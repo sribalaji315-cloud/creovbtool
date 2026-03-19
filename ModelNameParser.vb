@@ -2,6 +2,7 @@ Imports System
 
 Namespace CreoRegenAppVB
     Friend Enum CreoModelKind
+        Unknown = 0
         Part = 1
         Assembly = 2
         Drawing = 4
@@ -12,6 +13,7 @@ Namespace CreoRegenAppVB
         Friend Property Kind As CreoModelKind
         Friend Property Ext As String
         Friend Property FileName As String
+        Friend Property HasExplicitExtension As Boolean
     End Class
 
     Friend NotInheritable Class ModelNameParser
@@ -24,18 +26,20 @@ Namespace CreoRegenAppVB
             End If
 
             Dim trimmed = rawInput.Trim()
-            Dim dot = trimmed.LastIndexOf("."c)
+            Dim versionless = StripVersionSuffix(trimmed)
+            Dim dot = versionless.LastIndexOf("."c)
             If dot <= 0 Then
                 Return New ParsedModelName With {
-                    .Name = trimmed,
-                    .Kind = CreoModelKind.Part,
-                    .Ext = "PRT",
-                    .FileName = trimmed & ".prt"
+                    .Name = versionless,
+                    .Kind = CreoModelKind.Unknown,
+                    .Ext = String.Empty,
+                    .FileName = versionless,
+                    .HasExplicitExtension = False
                 }
             End If
 
-            Dim modelName = trimmed.Substring(0, dot)
-            Dim ext = trimmed.Substring(dot + 1).Trim().ToUpperInvariant()
+            Dim modelName = versionless.Substring(0, dot)
+            Dim ext = versionless.Substring(dot + 1).Trim().ToUpperInvariant()
             If modelName.Length = 0 Then
                 Throw New ArgumentException("Model name is empty.")
             End If
@@ -46,23 +50,54 @@ Namespace CreoRegenAppVB
                         .Name = modelName,
                         .Kind = CreoModelKind.Assembly,
                         .Ext = ext,
-                        .FileName = modelName & "." & ext.ToLowerInvariant()
+                        .FileName = modelName & "." & ext.ToLowerInvariant(),
+                        .HasExplicitExtension = True
                     }
                 Case "DRW"
                     Return New ParsedModelName With {
                         .Name = modelName,
                         .Kind = CreoModelKind.Drawing,
                         .Ext = ext,
-                        .FileName = modelName & "." & ext.ToLowerInvariant()
+                        .FileName = modelName & "." & ext.ToLowerInvariant(),
+                        .HasExplicitExtension = True
                     }
-                Case Else
+                Case "PRT"
                     Return New ParsedModelName With {
                         .Name = modelName,
                         .Kind = CreoModelKind.Part,
                         .Ext = ext,
-                        .FileName = modelName & "." & ext.ToLowerInvariant()
+                        .FileName = modelName & "." & ext.ToLowerInvariant(),
+                        .HasExplicitExtension = True
+                    }
+                Case Else
+                    Return New ParsedModelName With {
+                        .Name = modelName,
+                        .Kind = CreoModelKind.Unknown,
+                        .Ext = ext,
+                        .FileName = modelName & "." & ext.ToLowerInvariant(),
+                        .HasExplicitExtension = True
                     }
             End Select
+        End Function
+
+        Private Shared Function StripVersionSuffix(inputText As String) As String
+            Dim lastDot = inputText.LastIndexOf("."c)
+            If lastDot <= 0 OrElse lastDot = inputText.Length - 1 Then
+                Return inputText
+            End If
+
+            Dim suffix = inputText.Substring(lastDot + 1)
+            If suffix.Length = 0 Then
+                Return inputText
+            End If
+
+            For Each ch In suffix
+                If Not Char.IsDigit(ch) Then
+                    Return inputText
+                End If
+            Next
+
+            Return inputText.Substring(0, lastDot)
         End Function
     End Class
 End Namespace

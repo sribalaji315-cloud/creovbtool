@@ -1,5 +1,6 @@
 Imports System
 Imports System.Collections.Concurrent
+Imports System.Collections.Generic
 Imports System.Globalization
 Imports System.Threading
 Imports System.Threading.Tasks
@@ -29,6 +30,23 @@ Namespace CreoRegenAppVB
 
     Friend Class CreoSessionService
         Implements IDisposable
+
+        Private Shared ReadOnly _extensionKindMap As Dictionary(Of String, CreoModelKind) =
+            New Dictionary(Of String, CreoModelKind)(StringComparer.OrdinalIgnoreCase) From {
+                {"PRT", CreoModelKind.Part},
+                {"ASM", CreoModelKind.Assembly},
+                {"DRW", CreoModelKind.Drawing},
+                {"MFG", CreoModelKind.Part},
+                {"FRM", CreoModelKind.Drawing},
+                {"LAY", CreoModelKind.Drawing},
+                {"DGM", CreoModelKind.Drawing},
+                {"SEC", CreoModelKind.Part},
+                {"SKF", CreoModelKind.Part}
+            }
+
+        Private Shared ReadOnly _defaultExtensionOrder As String() = {
+            "PRT", "ASM", "DRW", "MFG", "FRM", "LAY", "DGM", "SEC", "SKF"
+        }
 
         Private ReadOnly _queue As BlockingCollection(Of Action)
         Private ReadOnly _worker As Thread
@@ -78,11 +96,11 @@ Namespace CreoRegenAppVB
                                End If
 
                                Dim parsed = ModelNameParser.Parse(modelInput)
-                               Dim desc = CreateModelDescriptor(parsed)
-                               Dim model = InvokeMethod(_session, "RetrieveModel", desc)
+                               Dim resolved As ParsedModelName = Nothing
+                               Dim model = TryRetrieveModel(parsed, resolved)
 
                                If model Is Nothing Then
-                                   Return OperationResult.Fail("Model not found: " & parsed.Name)
+                                   Return OperationResult.Fail("Model not found after trying supported extensions: " & parsed.Name)
                                End If
 
                                InvokeMethod(model, "Display")
@@ -97,7 +115,7 @@ Namespace CreoRegenAppVB
 
                                Dim fileName = TryGetString(model, "FileName", "GetFileName")
                                If String.IsNullOrWhiteSpace(fileName) Then
-                                   fileName = parsed.Name
+                                   fileName = resolved.FileName
                                End If
 
                                Return OperationResult.Ok("Retrieved and activated: " & fileName)
@@ -111,10 +129,10 @@ Namespace CreoRegenAppVB
                                End If
 
                                Dim parsed = ModelNameParser.Parse(modelInput)
-                               Dim desc = CreateModelDescriptor(parsed)
-                               Dim model = InvokeMethod(_session, "RetrieveModel", desc)
+                               Dim resolved As ParsedModelName = Nothing
+                               Dim model = TryRetrieveModel(parsed, resolved)
                                If model Is Nothing Then
-                                   Return OperationResult.Fail("Model not found: " & parsed.Name)
+                                   Return OperationResult.Fail("Model not found after trying supported extensions: " & parsed.Name)
                                End If
 
                                If Not CanRegenerate(model) Then
@@ -132,11 +150,81 @@ Namespace CreoRegenAppVB
 
                                Dim fileName = TryGetString(model, "FileName", "GetFileName")
                                If String.IsNullOrWhiteSpace(fileName) Then
-                                   fileName = parsed.Name
+                                   fileName = resolved.FileName
                                End If
 
                                Return OperationResult.Ok("Regeneration succeeded: " & fileName)
                            End Function)
+        End Function
+
+        Private Function TryRetrieveModel(parsed As ParsedModelName, ByRef resolved As ParsedModelName) As Object
+            resolved = Nothing
+
+            For Each candidate In BuildCandidateNames(parsed)
+                Try
+                    Dim desc = CreateModelDescriptor(candidate)
+                    Dim model = InvokeMethod(_session, "RetrieveModel", desc)
+                    If model IsNot Nothing Then
+                        resolved = candidate
+                        Return model
+                    End If
+                Catch
+                End Try
+            Next
+
+            Return Nothing
+        End Function
+
+        Private Function BuildCandidateNames(parsed As ParsedModelName) As List(Of ParsedModelName)
+            Dim candidates As New List(Of ParsedModelName)()
+            Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+            Dim addCandidate =
+                Sub(baseName As String, ext As String, kind As CreoModelKind, hasExtension As Boolean)
+                    Dim safeBase = baseName.Trim()
+                    If safeBase.Length = 0 Then
+                        Return
+                    End If
+
+                    Dim safeExt = If(ext, String.Empty).Trim().ToUpperInvariant()
+                    Dim fileName = If(safeExt.Length = 0, safeBase, safeBase & "." & safeExt.ToLowerInvariant())
+                    If seen.Contains(fileName) Then
+                        Return
+                    End If
+
+                    seen.Add(fileName)
+                    candidates.Add(New ParsedModelName With {
+                        .Name = safeBase,
+                        .Ext = safeExt,
+                        .Kind = kind,
+                        .FileName = fileName,
+                        .HasExplicitExtension = hasExtension
+                    })
+                End Sub
+
+            If parsed.HasExplicitExtension Then
+                addCandidate(parsed.Name, parsed.Ext, parsed.Kind, True)
+            Else
+                For Each ext In _defaultExtensionOrder
+                    addCandidate(parsed.Name, ext, GetKindFromExtension(ext), True)
+                Next
+            End If
+
+            addCandidate(parsed.Name, String.Empty, CreoModelKind.Unknown, False)
+            Return candidates
+        End Function
+
+        Private Function GetKindFromExtension(extension As String) As CreoModelKind
+            If String.IsNullOrWhiteSpace(extension) Then
+                Return CreoModelKind.Unknown
+            End If
+
+            Dim ext = extension.Trim().ToUpperInvariant()
+            If _extensionKindMap.ContainsKey(ext) Then
+                Return _extensionKindMap(ext)
+            End If
+
+            Return CreoModelKind.Unknown
         End Function
 
         Friend Function DisconnectAsync() As Task(Of OperationResult)
@@ -169,6 +257,10 @@ Namespace CreoRegenAppVB
                 Return InvokeMethod(descCreator, "CreateFromFileName", parsed.FileName)
             Catch
             End Try
+
+            If parsed.Kind = CreoModelKind.Unknown Then
+                Throw New InvalidOperationException("Unsupported or unknown model type for descriptor: " & parsed.FileName)
+            End If
 
             Return InvokeMethod(descCreator, "Create", GetModelTypeValue(parsed.Kind), parsed.Name, DBNull.Value)
         End Function
