@@ -886,6 +886,10 @@ Namespace CreoRegenAppVB
             _itemParamsTitle.Text = "Item Parameters - " & modelInput
         End Sub
 
+        ' SECURITY NOTE: This reflection call accesses the non-public "DoubleBuffered" property on
+        ' DataGridView controls. This is a well-known WinForms workaround required because DataGridView
+        ' does not expose DoubleBuffered as a public API. The property name is a hard-coded constant;
+        ' no user input is involved. BindingFlags.NonPublic is used only for this standard UI optimization.
         Private Shared Sub EnableDoubleBuffering(control As Control)
             Dim propertyInfo = control.GetType().GetProperty("DoubleBuffered", BindingFlags.NonPublic Or BindingFlags.Instance)
             If propertyInfo IsNot Nothing Then
@@ -991,6 +995,8 @@ Namespace CreoRegenAppVB
             Try
                 _service.Dispose()
             Catch
+                ' Intentional: ensure the form can always close even if COM session cleanup
+                ' throws due to Creo having already exited or been closed by the user.
             End Try
         End Sub
     End Class

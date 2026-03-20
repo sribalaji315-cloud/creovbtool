@@ -138,6 +138,13 @@ Namespace CreoRegenAppVB
     Friend Class CreoSessionService
         Implements IDisposable
 
+        ' Creo VB API model-type integer constants (EpfcModelType enumeration).
+        ' These values are part of the public Creo COM API contract and are fixed by PTC.
+        Private Const ModelTypeAssembly As Integer = 0
+        Private Const ModelTypePart As Integer = 1
+        Private Const ModelTypeDrawing As Integer = 2
+        Private Const ModelTypeLayout As Integer = 4
+
         Private Shared ReadOnly _extensionKindMap As Dictionary(Of String, CreoModelKind) =
             New Dictionary(Of String, CreoModelKind)(StringComparer.OrdinalIgnoreCase) From {
                 {"PRT", CreoModelKind.Part},
@@ -188,6 +195,8 @@ Namespace CreoRegenAppVB
                                    _session = GetSessionFromConnection(_asyncConnection)
                                    Return OperationResult.Ok("Connected to active Creo session.")
                                Catch
+                                   ' Intentional: Connect throws when no active Creo session is present.
+                                   ' In that case, fall through to Start to launch a new Creo session.
                                    Dim command = BuildStartCommand(settings.CreoStartCommand)
                                    _asyncConnection = InvokeMethod(creator, "Start", command, settings.TextDirectory)
                                    _session = GetSessionFromConnection(_asyncConnection)
@@ -254,7 +263,7 @@ Namespace CreoRegenAppVB
                                End Try
 
                                Try
-                                   If modelType = 2 OrElse modelType = 4 Then
+                                   If modelType = ModelTypeDrawing OrElse modelType = ModelTypeLayout Then
                                        ' Drawing/Layout regenerate signature takes no arguments.
                                        InvokeMethod(model, "Regenerate")
                                    Else
@@ -376,7 +385,7 @@ Namespace CreoRegenAppVB
                                End Try
 
                                Try
-                                   If modelType = 2 OrElse modelType = 4 Then
+                                   If modelType = ModelTypeDrawing OrElse modelType = ModelTypeLayout Then
                                        InvokeMethod(model, "Regenerate")
                                    Else
                                        Dim regenFactory = CreatePfcObject("CpfcRegenInstructions")
@@ -459,7 +468,7 @@ Namespace CreoRegenAppVB
                                End Try
 
                                Try
-                                   If modelType = 2 OrElse modelType = 4 Then
+                                   If modelType = ModelTypeDrawing OrElse modelType = ModelTypeLayout Then
                                        InvokeMethod(model, "Regenerate")
                                    Else
                                        Dim regenFactory = CreatePfcObject("CpfcRegenInstructions")
@@ -641,6 +650,8 @@ Namespace CreoRegenAppVB
                         Return model
                     End If
                 Catch
+                    ' Intentional: RetrieveModel throws if this candidate name/extension is not
+                    ' found in the session. Continue to the next candidate extension.
                 End Try
             Next
 
@@ -709,6 +720,8 @@ Namespace CreoRegenAppVB
                                Try
                                    InvokeMethod(_asyncConnection, "Disconnect")
                                Catch
+                                   ' Intentional: Disconnect may throw if Creo has already exited.
+                                   ' Swallow and continue cleanup regardless.
                                End Try
 
                                _session = Nothing
@@ -740,11 +753,11 @@ Namespace CreoRegenAppVB
         Private Function GetModelTypeValue(kind As CreoModelKind) As Integer
             Select Case kind
                 Case CreoModelKind.Assembly
-                    Return 0
+                    Return ModelTypeAssembly
                 Case CreoModelKind.Drawing
-                    Return 2
+                    Return ModelTypeDrawing
                 Case Else
-                    Return 1
+                    Return ModelTypePart
             End Select
         End Function
 
@@ -766,11 +779,16 @@ Namespace CreoRegenAppVB
             End If
         End Sub
 
+        ' SECURITY NOTE: RunMacro executes Creo mapkey sequences inside the already-running Creo process.
+        ' These macros are equivalent to menu commands inside Creo's own UI; they do not execute OS-level
+        ' commands or shell processes. The macro strings are hard-coded constants (not user-supplied) and
+        ' operate entirely within the Creo application boundary. This fallback is used only when the
+        ' direct Creo VB API Regenerate call is unavailable on the installed Creo version.
         Private Sub RunRegenerationMacros(modelType As Integer)
             InvokeMethod(_session, "RunMacro", "mapkey(continued) ~ Command `ProCmdNamedViewsGalSelect` `Default`;")
             InvokeMethod(_session, "RunMacro", "mapkey(continued) ~ Command `ProCmdRegenAuto`; #CURRENT VALS;#CURRENT VALS;#CURRENT VALS;#CURRENT VALS;#CURRENT VALS;#CURRENT VALS;")
 
-            If modelType = 2 OrElse modelType = 4 Then
+            If modelType = ModelTypeDrawing OrElse modelType = ModelTypeLayout Then
                 InvokeMethod(_session, "RunMacro", "mapkey(continued) ~ Command `ProCmdDwgRegenModel`;#AUTOMATIC;")
                 InvokeMethod(_session, "RunMacro", "mapkey(continued) ~ Command `ProCmdDwgRegenDraft`;")
             Else
@@ -877,6 +895,11 @@ Namespace CreoRegenAppVB
             Next
         End Sub
 
+        ' SECURITY NOTE: Late-bound COM activation. Activator.CreateInstance + Type.GetTypeFromProgID are used
+        ' here exclusively to instantiate registered PTC Creo VB API COM objects. The ProgIDs are hard-coded
+        ' constants from the Creo API spec (pfcls.* / pfc.*) and are not user-supplied or externally controllable.
+        ' This pattern may trigger EDR scrutiny (COM hijacking / LOLbin detection) but serves a legitimate
+        ' engineering integration purpose. No user-controlled ProgIDs are ever passed to this method.
         Private Function CreatePfcObject(className As String) As Object
             Dim progIds = {
                 "pfcls." & className,
@@ -889,16 +912,23 @@ Namespace CreoRegenAppVB
                 Try
                     Return Activator.CreateInstance(Type.GetTypeFromProgID(progId, throwOnError:=True))
                 Catch
+                    ' Intentional: try the next ProgID variant. Creo API registration
+                    ' differs across product versions, so multiple known patterns are tried.
                 End Try
             Next
 
             Throw New InvalidOperationException("Unable to create Creo COM object for " & className & ". Run vb_api_register.bat and verify COM registration.")
         End Function
 
+        ' SECURITY NOTE: CallByName is VB late-binding dispatch. It is used here to access properties
+        ' on Creo COM objects whose interfaces are version-dependent. Property names are hard-coded
+        ' constants within this class and are never constructed from user input.
         Private Function GetProperty(instance As Object, propertyName As String) As Object
             Try
                 Return CallByName(instance, propertyName, CallType.Get)
             Catch
+                ' Intentional: COM property access may fail legitimately if the interface version
+                ' does not expose this property. Return Nothing and let the caller handle absence.
                 Return Nothing
             End Try
         End Function
@@ -1268,7 +1298,7 @@ Namespace CreoRegenAppVB
             Try
                 Dim typeValue = GetProperty(model, "Type")
                 If typeValue IsNot Nothing Then
-                    Return CInt(typeValue) = 0
+                    Return CInt(typeValue) = ModelTypeAssembly
                 End If
             Catch
             End Try
@@ -1280,7 +1310,7 @@ Namespace CreoRegenAppVB
             Try
                 Dim typeValue = GetProperty(modelDescr, "Type")
                 If typeValue IsNot Nothing Then
-                    Return CInt(typeValue) = 0
+                    Return CInt(typeValue) = ModelTypeAssembly
                 End If
             Catch
             End Try
@@ -1293,11 +1323,11 @@ Namespace CreoRegenAppVB
                 Dim typeValue = GetProperty(instance, "Type")
                 If typeValue IsNot Nothing Then
                     Select Case CInt(typeValue)
-                        Case 0
+                        Case ModelTypeAssembly
                             Return "Assembly"
-                        Case 1
+                        Case ModelTypePart
                             Return "Part"
-                        Case 2
+                        Case ModelTypeDrawing
                             Return "Drawing"
                     End Select
                 End If
@@ -1434,9 +1464,12 @@ Namespace CreoRegenAppVB
             Dim modelItemFactory As Object = Nothing
 
             Try
-                ' We try explicit CMpfcModelItem since that maps to PTC's VB API exact module
+                ' SECURITY NOTE: Late-bound COM activation. "pfcls.CMpfcModelItem" is a hard-coded,
+                ' well-known PTC Creo VB API ProgID used to create typed parameter value objects.
+                ' This is not user-controllable and serves an explicit engineering integration purpose.
                 modelItemFactory = Activator.CreateInstance(Type.GetTypeFromProgID("pfcls.CMpfcModelItem", True))
             Catch
+                ' Intentional: fall back to the variant ProgID search via CreatePfcObject below.
             End Try
 
             If modelItemFactory Is Nothing Then
@@ -1494,6 +1527,7 @@ Namespace CreoRegenAppVB
                     Try
                         InvokeMethod(_asyncConnection, "Disconnect")
                     Catch
+                        ' Intentional: Creo process may already be gone by the time Dispose is called.
                     End Try
                 End If
             Finally
