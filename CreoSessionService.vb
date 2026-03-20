@@ -26,6 +26,11 @@ Namespace CreoRegenAppVB
         Friend Property Description As String
     End Class
 
+    Friend Class ParameterUpdateItem
+        Friend Property Name As String
+        Friend Property UserInput As String
+    End Class
+
     Friend Class ParameterQueryResult
         Friend Property Success As Boolean
         Friend Property Message As String
@@ -37,6 +42,87 @@ Namespace CreoRegenAppVB
 
         Friend Shared Function Fail(message As String) As ParameterQueryResult
             Return New ParameterQueryResult With {.Success = False, .Message = message, .Items = New List(Of ParameterItem)()}
+        End Function
+    End Class
+
+    Friend Class FeatureItem
+        Public Property Id As Integer
+        Public Property Name As String
+        Public Property TypeName As String
+        Public Property SubTypeName As String
+        Public Property Status As String
+    End Class
+
+    Friend Class FeatureQueryResult
+        Public Property Success As Boolean
+        Public Property Message As String
+        Public Property Items As List(Of FeatureItem)
+
+        Public Shared Function Ok(items As List(Of FeatureItem), message As String) As FeatureQueryResult
+            Return New FeatureQueryResult With {.Success = True, .Message = message, .Items = items}
+        End Function
+
+        Public Shared Function Fail(message As String) As FeatureQueryResult
+            Return New FeatureQueryResult With {.Success = False, .Message = message, .Items = New List(Of FeatureItem)()}
+        End Function
+    End Class
+
+    Friend Class ComponentItem
+        Public Property FeatureId As Integer
+        Public Property ComponentName As String
+        Public Property FileName As String
+    End Class
+
+    Friend Class ComponentQueryResult
+        Public Property Success As Boolean
+        Public Property Message As String
+        Public Property Items As List(Of ComponentItem)
+
+        Public Shared Function Ok(items As List(Of ComponentItem), message As String) As ComponentQueryResult
+            Return New ComponentQueryResult With {.Success = True, .Message = message, .Items = items}
+        End Function
+
+        Public Shared Function Fail(message As String) As ComponentQueryResult
+            Return New ComponentQueryResult With {.Success = False, .Message = message, .Items = New List(Of ComponentItem)()}
+        End Function
+    End Class
+
+    Friend Class BomNodeItem
+        Public Property Level As Integer
+        Public Property FeatureId As Integer
+        Public Property DisplayName As String
+        Public Property FileName As String
+        Public Property ModelTypeName As String
+        Public Property Descp As String
+        Public Property BsClass As String
+        Public Property Children As List(Of BomNodeItem)
+    End Class
+
+    Friend Class BomGridRowItem
+        Public Property NodeId As Integer
+        Public Property ParentNodeId As Integer
+        Public Property HasChildren As Boolean
+        Public Property Level As Integer
+        Public Property FeatureId As Integer
+        Public Property DisplayName As String
+        Public Property FileName As String
+        Public Property ModelTypeName As String
+        Public Property Descp As String
+        Public Property BsClass As String
+    End Class
+
+    Friend Class BomQueryResult
+        Public Property Success As Boolean
+        Public Property Message As String
+        Public Property Root As BomNodeItem
+        Public Property Rows As List(Of BomGridRowItem)
+
+        Public Shared Function Ok(root As BomNodeItem, rows As List(Of BomGridRowItem), message As String) As BomQueryResult
+            Return New BomQueryResult With {.Success = True, .Message = message, .Root = root, .Rows = rows}
+        End Function
+
+        Public Shared Function Fail(message As String) As BomQueryResult
+            Return New BomQueryResult With {.Success = False, .Message = message, .Root = Nothing, .Rows = New List(Of BomGridRowItem)()}
         End Function
     End Class
 
@@ -307,6 +393,242 @@ Namespace CreoRegenAppVB
                            End Function)
         End Function
 
+        Friend Function SetParametersAsync(modelInput As String, updates As IEnumerable(Of ParameterUpdateItem)) As Task(Of OperationResult)
+            Return Enqueue(Function()
+                               If _session Is Nothing Then
+                                   Return OperationResult.Fail("No active Creo session. Click Connect first.")
+                               End If
+
+                               If updates Is Nothing Then
+                                   Return OperationResult.Fail("No parameter updates were provided.")
+                               End If
+
+                               Dim updateList As New List(Of ParameterUpdateItem)()
+                               For Each update In updates
+                                   If update Is Nothing Then
+                                       Continue For
+                                   End If
+
+                                   Dim parameterName = If(update.Name, String.Empty).Trim()
+                                   Dim userInput = If(update.UserInput, String.Empty).Trim()
+                                   If parameterName.Length = 0 OrElse userInput.Length = 0 Then
+                                       Continue For
+                                   End If
+
+                                   updateList.Add(New ParameterUpdateItem With {
+                                       .Name = parameterName,
+                                       .UserInput = userInput
+                                   })
+                               Next
+
+                               If updateList.Count = 0 Then
+                                   Return OperationResult.Fail("No parameter rows contain a new value.")
+                               End If
+
+                               Dim parsed = ModelNameParser.Parse(modelInput)
+                               Dim resolved As ParsedModelName = Nothing
+                               Dim model = TryRetrieveModel(parsed, resolved)
+                               If model Is Nothing Then
+                                   Return OperationResult.Fail("Model not found after trying supported extensions: " & parsed.Name)
+                               End If
+
+                               For Each update In updateList
+                                   Dim param = FindParameterByName(model, update.Name)
+                                   If param Is Nothing Then
+                                       Return OperationResult.Fail("Parameter not found: " & update.Name)
+                                   End If
+
+                                   Dim currentValue = GetProperty(param, "Value")
+                                   Dim discr = GetParamDiscr(currentValue)
+                                   Dim newValue = CreateParamValueFromInput(discr, update.UserInput)
+                                   If newValue Is Nothing Then
+                                       Return OperationResult.Fail("Set failed: Could not create parameter value object for discr=" & discr.ToString(CultureInfo.InvariantCulture) & ". Input: " & update.UserInput)
+                                   End If
+
+                                   Try
+                                       SetProperty(param, "Value", newValue)
+                                   Catch ex As Exception
+                                       Return OperationResult.Fail("Error assigning new value to parameter '" & update.Name & "': " & ex.Message)
+                                   End Try
+                               Next
+
+                               Dim modelType As Integer = -1
+                               Try
+                                   modelType = CInt(GetProperty(model, "Type"))
+                               Catch
+                               End Try
+
+                               Try
+                                   If modelType = 2 OrElse modelType = 4 Then
+                                       InvokeMethod(model, "Regenerate")
+                                   Else
+                                       Dim regenFactory = CreatePfcObject("CpfcRegenInstructions")
+                                       Dim regenInstructions = InvokeMethod(regenFactory, "Create")
+                                       InvokeMethod(model, "Regenerate", regenInstructions)
+                                   End If
+                               Catch
+                                   ActivateModelWindow(model)
+                                   RunRegenerationMacros(modelType)
+                               End Try
+
+                               Return OperationResult.Ok("Updated " & updateList.Count.ToString(CultureInfo.InvariantCulture) & " parameter(s) and regenerated model.")
+                           End Function)
+        End Function
+
+        Friend Function GetFeaturesAsync(modelInput As String) As Task(Of FeatureQueryResult)
+            Return EnqueueFeatures(Function()
+                                         If _session Is Nothing Then
+                                             Return FeatureQueryResult.Fail("No active Creo session. Click Connect first.")
+                                         End If
+
+                                         Dim parsed = ModelNameParser.Parse(modelInput)
+                                         Dim resolved As ParsedModelName = Nothing
+                                         Dim model = TryRetrieveModel(parsed, resolved)
+                                         If model Is Nothing Then
+                                             Return FeatureQueryResult.Fail("Model not found after trying supported extensions: " & parsed.Name)
+                                         End If
+
+                                         Dim featuresObj = GetFeaturesCollection(model)
+                                         If featuresObj Is Nothing Then
+                                             Return FeatureQueryResult.Fail("Selected model does not expose features (e.g. it might not be a solid).")
+                                         End If
+
+                                         Dim countMsg As String = ""
+                                         Dim count = GetCollectionCount(featuresObj, countMsg)
+
+                                         Dim items As New List(Of FeatureItem)()
+
+                                         For i As Integer = 0 To count - 1
+                                             Dim feat = GetCollectionItem(featuresObj, i)
+                                             If feat Is Nothing Then
+                                                 Continue For
+                                             End If
+
+                                             Dim idVal As Integer = -1
+                                             Try
+                                                 Dim idProp = GetProperty(feat, "Id")
+                                                 If idProp IsNot Nothing Then
+                                                     idVal = CInt(idProp)
+                                                 End If
+                                             Catch
+                                             End Try
+
+                                             Dim typeName = TryGetString(feat, "FeatTypeName", "GetFeatTypeName")
+                                             Dim subTypeName = TryGetString(feat, "FeatSubType", "GetFeatSubType")
+                                             Dim statusVal = TryGetString(feat, "Status", "GetStatus")
+
+                                             items.Add(New FeatureItem With {
+                                                .Id = idVal,
+                                                .Name = TryGetString(feat, "Name", "GetName"),
+                                                .TypeName = typeName,
+                                                .SubTypeName = subTypeName,
+                                                .Status = statusVal
+                                             })
+                                         Next
+
+                                         Dim fileName = TryGetString(model, "FileName", "GetFileName")
+                                         If String.IsNullOrWhiteSpace(fileName) Then
+                                             fileName = resolved.FileName
+                                         End If
+
+                                         Return FeatureQueryResult.Ok(items, "Loaded " & items.Count.ToString(CultureInfo.InvariantCulture) & " feature(s) from " & fileName)
+                                     End Function)
+        End Function
+
+        Friend Function GetComponentsAsync(modelInput As String) As Task(Of ComponentQueryResult)
+            Return EnqueueComponents(Function()
+                                          If _session Is Nothing Then
+                                              Return ComponentQueryResult.Fail("No active Creo session. Click Connect first.")
+                                          End If
+
+                                          Dim parsed = ModelNameParser.Parse(modelInput)
+                                          Dim resolved As ParsedModelName = Nothing
+                                          Dim model = TryRetrieveModel(parsed, resolved)
+                                          If model Is Nothing Then
+                                              Return ComponentQueryResult.Fail("Model not found after trying supported extensions: " & parsed.Name)
+                                          End If
+
+                                          Dim featuresObj = GetFeaturesCollection(model)
+                                          If featuresObj Is Nothing Then
+                                              Return ComponentQueryResult.Fail("Selected model does not expose features.")
+                                          End If
+
+                                          Dim countMsg As String = ""
+                                          Dim count = GetCollectionCount(featuresObj, countMsg)
+                                          Dim items As New List(Of ComponentItem)()
+
+                                          For i As Integer = 0 To count - 1
+                                              Dim feat = GetCollectionItem(featuresObj, i)
+                                              If feat Is Nothing Then
+                                                  Continue For
+                                              End If
+
+                                              Dim modelDescr = GetProperty(feat, "ModelDescr")
+                                              If modelDescr Is Nothing Then
+                                                  modelDescr = InvokeMethodSafe(feat, "GetModelDescr")
+                                              End If
+                                              If modelDescr Is Nothing Then
+                                                  Continue For
+                                              End If
+
+                                              Dim componentName = TryGetString(modelDescr, "InstanceName", "GetFullName")
+                                              Dim fileName = TryGetString(modelDescr, "FileName", "GetFileName")
+
+                                              If String.IsNullOrWhiteSpace(componentName) Then
+                                                  componentName = fileName
+                                              End If
+
+                                              If String.IsNullOrWhiteSpace(componentName) Then
+                                                  componentName = TryGetString(modelDescr, "GenericName", "GetGenericName")
+                                              End If
+
+                                              items.Add(New ComponentItem With {
+                                                 .FeatureId = GetFeatureId(feat),
+                                                 .ComponentName = componentName,
+                                                 .FileName = fileName
+                                              })
+                                          Next
+
+                                          Dim activeFileName = TryGetString(model, "FileName", "GetFileName")
+                                          If String.IsNullOrWhiteSpace(activeFileName) Then
+                                              activeFileName = resolved.FileName
+                                          End If
+
+                                          Return ComponentQueryResult.Ok(items, "Loaded " & items.Count.ToString(CultureInfo.InvariantCulture) & " component feature(s) from " & activeFileName)
+                                      End Function)
+        End Function
+
+        Friend Function GetBomHierarchyAsync(modelInput As String) As Task(Of BomQueryResult)
+            Return EnqueueBom(Function()
+                                  If _session Is Nothing Then
+                                      Return BomQueryResult.Fail("No active Creo session. Click Connect first.")
+                                  End If
+
+                                  Dim parsed = ModelNameParser.Parse(modelInput)
+                                  Dim resolved As ParsedModelName = Nothing
+                                  Dim model = TryRetrieveModel(parsed, resolved)
+                                  If model Is Nothing Then
+                                      Return BomQueryResult.Fail("Model not found after trying supported extensions: " & parsed.Name)
+                                  End If
+
+                                  Dim rootFileName = TryGetString(model, "FileName", "GetFileName")
+                                  If String.IsNullOrWhiteSpace(rootFileName) Then
+                                      rootFileName = resolved.FileName
+                                  End If
+
+                                  If Not IsAssemblyModel(model, rootFileName) Then
+                                      Return BomQueryResult.Fail("BOM hierarchy requires an assembly model.")
+                                  End If
+
+                                  Dim rootNode = BuildBomNode(model, ResolveModelDisplayName(model, rootFileName), rootFileName, -1, 0)
+                                  Dim rows = New List(Of BomGridRowItem)()
+                                  Dim nextNodeId As Integer = 1
+                                  FlattenBomNode(rootNode, rows, 0, nextNodeId)
+                                  Dim nodeCount = CountBomNodes(rootNode) - 1
+                                  Return BomQueryResult.Ok(rootNode, rows, "Built BOM hierarchy with " & nodeCount.ToString(CultureInfo.InvariantCulture) & " component node(s) from " & rootFileName)
+                              End Function)
+        End Function
+
         Private Function TryRetrieveModel(parsed As ParsedModelName, ByRef resolved As ParsedModelName) As Object
             resolved = Nothing
 
@@ -501,6 +823,54 @@ Namespace CreoRegenAppVB
             Return tcs.Task
         End Function
 
+        Private Function EnqueueFeatures(work As Func(Of FeatureQueryResult)) As Task(Of FeatureQueryResult)
+            If _disposed Then
+                Return Task.FromResult(FeatureQueryResult.Fail("Service is already disposed."))
+            End If
+
+            Dim tcs As New TaskCompletionSource(Of FeatureQueryResult)(TaskCreationOptions.RunContinuationsAsynchronously)
+            _queue.Add(Sub()
+                           Try
+                               tcs.TrySetResult(work())
+                           Catch ex As Exception
+                               tcs.TrySetResult(FeatureQueryResult.Fail("CREO ERROR: " & ex.Message))
+                           End Try
+                       End Sub)
+            Return tcs.Task
+        End Function
+
+        Private Function EnqueueComponents(work As Func(Of ComponentQueryResult)) As Task(Of ComponentQueryResult)
+            If _disposed Then
+                Return Task.FromResult(ComponentQueryResult.Fail("Service is already disposed."))
+            End If
+
+            Dim tcs As New TaskCompletionSource(Of ComponentQueryResult)(TaskCreationOptions.RunContinuationsAsynchronously)
+            _queue.Add(Sub()
+                           Try
+                               tcs.TrySetResult(work())
+                           Catch ex As Exception
+                               tcs.TrySetResult(ComponentQueryResult.Fail("CREO ERROR: " & ex.Message))
+                           End Try
+                       End Sub)
+            Return tcs.Task
+        End Function
+
+        Private Function EnqueueBom(work As Func(Of BomQueryResult)) As Task(Of BomQueryResult)
+            If _disposed Then
+                Return Task.FromResult(BomQueryResult.Fail("Service is already disposed."))
+            End If
+
+            Dim tcs As New TaskCompletionSource(Of BomQueryResult)(TaskCreationOptions.RunContinuationsAsynchronously)
+            _queue.Add(Sub()
+                           Try
+                               tcs.TrySetResult(work())
+                           Catch ex As Exception
+                               tcs.TrySetResult(BomQueryResult.Fail("CREO ERROR: " & ex.Message))
+                           End Try
+                       End Sub)
+            Return tcs.Task
+        End Function
+
         Private Sub ProcessQueue()
             For Each action In _queue.GetConsumingEnumerable()
                 action.Invoke()
@@ -560,6 +930,14 @@ Namespace CreoRegenAppVB
                 Case Else
                     Throw New NotSupportedException("InvokeMethod currently supports up to 4 arguments for late-bound COM calls.")
             End Select
+        End Function
+
+        Private Function InvokeMethodSafe(instance As Object, methodName As String, ParamArray args As Object()) As Object
+            Try
+                Return InvokeMethod(instance, methodName, args)
+            Catch
+                Return Nothing
+            End Try
         End Function
 
         Private Function TryGetString(instance As Object, propertyName As String, methodName As String) As String
@@ -658,6 +1036,303 @@ Namespace CreoRegenAppVB
             End Try
 
             Return Nothing
+        End Function
+
+        Private Function GetFeaturesCollection(model As Object) As Object
+            Try
+                Dim featsObj = InvokeMethod(model, "ListItems", 0) ' 0 = EpfcITEM_FEATURE
+                If featsObj IsNot Nothing Then
+                    Return featsObj
+                End If
+            Catch
+            End Try
+
+            Try
+                Dim featsObj = InvokeMethod(model, "ListFeatures")
+                If featsObj IsNot Nothing Then
+                    Return featsObj
+                End If
+            Catch
+            End Try
+
+            Try
+                Dim featsObj = GetProperty(model, "Features")
+                If featsObj IsNot Nothing Then
+                    Return featsObj
+                End If
+            Catch
+            End Try
+
+            Return Nothing
+        End Function
+
+        Private Function BuildBomNode(model As Object, displayName As String, fileName As String, featureId As Integer, depth As Integer) As BomNodeItem
+            Dim node As New BomNodeItem With {
+                .Level = depth,
+                .FeatureId = featureId,
+                .DisplayName = displayName,
+                .FileName = fileName,
+                .ModelTypeName = GetModelTypeName(model, fileName),
+                .Descp = GetModelParameterText(model, "DESCP"),
+                .BsClass = GetModelParameterText(model, "BS_CLASS", "BS_Class"),
+                .Children = New List(Of BomNodeItem)()
+            }
+
+            If depth >= 32 Then
+                Return node
+            End If
+
+            Dim featuresObj = GetFeaturesCollection(model)
+            If featuresObj Is Nothing Then
+                Return node
+            End If
+
+            Dim countMsg As String = ""
+            Dim count = GetCollectionCount(featuresObj, countMsg)
+
+            For i As Integer = 0 To count - 1
+                Dim feat = GetCollectionItem(featuresObj, i)
+                If feat Is Nothing Then
+                    Continue For
+                End If
+
+                Dim modelDescr = GetFeatureModelDescriptor(feat)
+                If modelDescr Is Nothing Then
+                    Continue For
+                End If
+
+                Dim childFileName = ResolveDescriptorFileName(modelDescr)
+                Dim childDisplayName = ResolveDescriptorDisplayName(modelDescr, childFileName)
+                Dim childModel = RetrieveModelFromDescriptor(modelDescr)
+                Dim childTypeName = GetModelTypeName(If(childModel, modelDescr), childFileName)
+                Dim childDescp = If(childModel IsNot Nothing, GetModelParameterText(childModel, "DESCP"), String.Empty)
+                Dim childBsClass = If(childModel IsNot Nothing, GetModelParameterText(childModel, "BS_CLASS", "BS_Class"), String.Empty)
+                Dim childNode = New BomNodeItem With {
+                    .Level = depth + 1,
+                    .FeatureId = GetFeatureId(feat),
+                    .DisplayName = childDisplayName,
+                    .FileName = childFileName,
+                    .ModelTypeName = childTypeName,
+                    .Descp = childDescp,
+                    .BsClass = childBsClass,
+                    .Children = New List(Of BomNodeItem)()
+                }
+
+                If childModel IsNot Nothing AndAlso IsAssemblyModel(childModel, childFileName) Then
+                    childNode = BuildBomNode(childModel, childDisplayName, childFileName, GetFeatureId(feat), depth + 1)
+                End If
+
+                node.Children.Add(childNode)
+            Next
+
+            Return node
+        End Function
+
+        Private Sub FlattenBomNode(node As BomNodeItem, rows As List(Of BomGridRowItem), parentNodeId As Integer, ByRef nextNodeId As Integer)
+            If node Is Nothing OrElse rows Is Nothing Then
+                Return
+            End If
+
+            Dim currentNodeId = nextNodeId
+            nextNodeId += 1
+
+            rows.Add(New BomGridRowItem With {
+                .NodeId = currentNodeId,
+                .ParentNodeId = parentNodeId,
+                .HasChildren = node.Children IsNot Nothing AndAlso node.Children.Count > 0,
+                .Level = node.Level,
+                .FeatureId = node.FeatureId,
+                .DisplayName = node.DisplayName,
+                .FileName = node.FileName,
+                .ModelTypeName = node.ModelTypeName,
+                .Descp = node.Descp,
+                .BsClass = node.BsClass
+            })
+
+            If node.Children Is Nothing Then
+                Return
+            End If
+
+            For Each child In node.Children
+                FlattenBomNode(child, rows, currentNodeId, nextNodeId)
+            Next
+        End Sub
+
+        Private Function CountBomNodes(node As BomNodeItem) As Integer
+            If node Is Nothing Then
+                Return 0
+            End If
+
+            Dim total = 1
+            If node.Children Is Nothing Then
+                Return total
+            End If
+
+            For Each child In node.Children
+                total += CountBomNodes(child)
+            Next
+
+            Return total
+        End Function
+
+        Private Function GetFeatureModelDescriptor(feature As Object) As Object
+            Dim modelDescr = GetProperty(feature, "ModelDescr")
+            If modelDescr IsNot Nothing Then
+                Return modelDescr
+            End If
+
+            Return InvokeMethodSafe(feature, "GetModelDescr")
+        End Function
+
+        Private Function RetrieveModelFromDescriptor(modelDescr As Object) As Object
+            If modelDescr Is Nothing Then
+                Return Nothing
+            End If
+
+            Try
+                Return InvokeMethod(_session, "RetrieveModel", modelDescr)
+            Catch
+                Return Nothing
+            End Try
+        End Function
+
+        Private Function ResolveDescriptorDisplayName(modelDescr As Object, fallbackFileName As String) As String
+            Dim name = TryGetString(modelDescr, "InstanceName", "GetFullName")
+            If Not String.IsNullOrWhiteSpace(name) Then
+                Return name
+            End If
+
+            name = TryGetString(modelDescr, "FileName", "GetFileName")
+            If Not String.IsNullOrWhiteSpace(name) Then
+                Return name
+            End If
+
+            name = TryGetString(modelDescr, "GenericName", "GetGenericName")
+            If Not String.IsNullOrWhiteSpace(name) Then
+                Return name
+            End If
+
+            Return fallbackFileName
+        End Function
+
+        Private Function ResolveDescriptorFileName(modelDescr As Object) As String
+            Dim fileName = TryGetString(modelDescr, "FileName", "GetFileName")
+            If Not String.IsNullOrWhiteSpace(fileName) Then
+                Return fileName
+            End If
+
+            Return TryGetString(modelDescr, "InstanceName", "GetFullName")
+        End Function
+
+        Private Function ResolveModelDisplayName(model As Object, fallbackFileName As String) As String
+            Dim name = TryGetString(model, "InstanceName", "GetInstanceName")
+            If Not String.IsNullOrWhiteSpace(name) Then
+                Return name
+            End If
+
+            name = TryGetString(model, "FileName", "GetFileName")
+            If Not String.IsNullOrWhiteSpace(name) Then
+                Return name
+            End If
+
+            Return fallbackFileName
+        End Function
+
+        Private Function GetModelParameterText(model As Object, ParamArray parameterNames As String()) As String
+            If model Is Nothing OrElse parameterNames Is Nothing Then
+                Return String.Empty
+            End If
+
+            For Each parameterName In parameterNames
+                If String.IsNullOrWhiteSpace(parameterName) Then
+                    Continue For
+                End If
+
+                Dim param = FindParameterByName(model, parameterName)
+                If param Is Nothing Then
+                    Continue For
+                End If
+
+                Try
+                    Dim paramValue = GetProperty(param, "Value")
+                    Dim discr = GetParamDiscr(paramValue)
+                    Return GetParamValueText(paramValue, discr)
+                Catch
+                End Try
+            Next
+
+            Return String.Empty
+        End Function
+
+        Private Function IsAssemblyModel(model As Object, fallbackFileName As String) As Boolean
+            Try
+                Dim typeValue = GetProperty(model, "Type")
+                If typeValue IsNot Nothing Then
+                    Return CInt(typeValue) = 0
+                End If
+            Catch
+            End Try
+
+            Return HasAssemblyExtension(fallbackFileName)
+        End Function
+
+        Private Function IsAssemblyDescriptor(modelDescr As Object, fallbackFileName As String) As Boolean
+            Try
+                Dim typeValue = GetProperty(modelDescr, "Type")
+                If typeValue IsNot Nothing Then
+                    Return CInt(typeValue) = 0
+                End If
+            Catch
+            End Try
+
+            Return HasAssemblyExtension(fallbackFileName)
+        End Function
+
+        Private Function GetModelTypeName(instance As Object, fallbackFileName As String) As String
+            Try
+                Dim typeValue = GetProperty(instance, "Type")
+                If typeValue IsNot Nothing Then
+                    Select Case CInt(typeValue)
+                        Case 0
+                            Return "Assembly"
+                        Case 1
+                            Return "Part"
+                        Case 2
+                            Return "Drawing"
+                    End Select
+                End If
+            Catch
+            End Try
+
+            If HasAssemblyExtension(fallbackFileName) Then
+                Return "Assembly"
+            End If
+
+            Return "Part"
+        End Function
+
+        Private Function HasAssemblyExtension(fileName As String) As Boolean
+            If String.IsNullOrWhiteSpace(fileName) Then
+                Return False
+            End If
+
+            Return fileName.EndsWith(".asm", StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        Private Function GetFeatureId(feature As Object) As Integer
+            If feature Is Nothing Then
+                Return -1
+            End If
+
+            Try
+                Dim idProp = GetProperty(feature, "Id")
+                If idProp IsNot Nothing Then
+                    Return CInt(idProp)
+                End If
+            Catch
+            End Try
+
+            Return -1
         End Function
 
         Private Function GetCollectionCount(collection As Object, ByRef outMsg As String) As Integer
