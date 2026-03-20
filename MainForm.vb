@@ -12,9 +12,7 @@ Namespace CreoRegenAppVB
         Inherits Form
 
         Private Const BomTabIndex As Integer = 2
-        Private Const ItemPanelMinWidth As Integer = 520
-        Private Const ItemPanelMaxWidth As Integer = 760
-        Private Const ItemPanelMinExtra As Integer = 360
+        Private Const ItemPanelMinWidth As Integer = 320
 
         Private ReadOnly _service As CreoSessionService
 
@@ -32,8 +30,6 @@ Namespace CreoRegenAppVB
         Private ReadOnly _collapseAllBomButton As Button
         Private ReadOnly _showItemParametersButton As Button
         Private ReadOnly _setParameterButton As Button
-        Private ReadOnly _saveLayoutButton As Button
-        Private ReadOnly _resetLayoutButton As Button
         Private ReadOnly _clearLogButton As Button
         Private ReadOnly _outputTextBox As TextBox
         Private ReadOnly _tabs As TabControl
@@ -44,13 +40,11 @@ Namespace CreoRegenAppVB
         Private ReadOnly _bomRowsAll As List(Of BomGridRowItem)
         Private ReadOnly _bomRowsByNodeId As Dictionary(Of Integer, BomGridRowItem)
         Private ReadOnly _bomCollapsedNodeIds As HashSet(Of Integer)
-        Private ReadOnly _itemParamsSplitter As Splitter
         Private ReadOnly _itemParamsPanel As Panel
         Private ReadOnly _itemParamsTitle As Label
         Private ReadOnly _itemParamsLoadingBar As ProgressBar
         Private ReadOnly _itemParamsGrid As DataGridView
         Private ReadOnly _itemSetParameterButton As Button
-        Private ReadOnly _layoutSettingsPath As String
         Private _selectedBomModelInput As String
 
         Friend Sub New()
@@ -66,8 +60,6 @@ Namespace CreoRegenAppVB
             _bomRowsAll = New List(Of BomGridRowItem)()
             _bomRowsByNodeId = New Dictionary(Of Integer, BomGridRowItem)()
             _bomCollapsedNodeIds = New HashSet(Of Integer)()
-            _layoutSettingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CreoRegenAppVB", "layout-settings.txt")
-
             Dim root As New TableLayoutPanel()
             root.Dock = DockStyle.Fill
             root.Padding = New Padding(10)
@@ -177,18 +169,6 @@ Namespace CreoRegenAppVB
             _clearLogButton.Margin = New Padding(2)
             AddHandler _clearLogButton.Click, Sub(sender, args) _outputTextBox.Clear()
 
-            _saveLayoutButton = New Button()
-            _saveLayoutButton.Text = "Save Layout"
-            _saveLayoutButton.AutoSize = True
-            _saveLayoutButton.Margin = New Padding(2)
-            AddHandler _saveLayoutButton.Click, AddressOf SaveLayoutClicked
-
-            _resetLayoutButton = New Button()
-            _resetLayoutButton.Text = "Reset Layout"
-            _resetLayoutButton.AutoSize = True
-            _resetLayoutButton.Margin = New Padding(2)
-            AddHandler _resetLayoutButton.Click, AddressOf ResetLayoutClicked
-
             modelRow.Controls.Add(_modelLabel, 0, 0)
             modelRow.Controls.Add(_modelNameTextBox, 1, 0)
 
@@ -213,8 +193,6 @@ Namespace CreoRegenAppVB
                 _collapseAllBomButton,
                 _showItemParametersButton,
                 _setParameterButton,
-                _saveLayoutButton,
-                _resetLayoutButton,
                 _clearLogButton
             }
 
@@ -340,13 +318,6 @@ Namespace CreoRegenAppVB
             AddHandler _bomGrid.CellContentClick, AddressOf BomGridCellContentClick
             AddHandler _bomGrid.SelectionChanged, AddressOf BomGridSelectionChanged
 
-            _itemParamsSplitter = New Splitter()
-            _itemParamsSplitter.Dock = DockStyle.Right
-            _itemParamsSplitter.Width = 6
-            _itemParamsSplitter.MinSize = ItemPanelMinExtra
-            _itemParamsSplitter.MinExtra = ItemPanelMinWidth
-            _itemParamsSplitter.BackColor = Color.Gainsboro
-
             _itemParamsPanel = New Panel()
             _itemParamsPanel.Dock = DockStyle.Right
             _itemParamsPanel.Width = ItemPanelMinWidth
@@ -447,11 +418,9 @@ Namespace CreoRegenAppVB
             root.Controls.Add(_tabs, 0, 1)
 
             Controls.Add(root)
-            Controls.Add(_itemParamsSplitter)
             Controls.Add(_itemParamsPanel)
 
             ApplyDefaultLayoutSettings()
-            LoadLayoutSettings()
             UpdateItemPanelWidth()
             UpdateItemPanelVisibility()
 
@@ -578,6 +547,7 @@ Namespace CreoRegenAppVB
 
                 RenderBomGrid()
                 UpdateShowParametersButtonState()
+                WindowState = FormWindowState.Maximized
 
                 _tabs.SelectedIndex = 2
                 AddLog("OK: " & result.Message)
@@ -709,7 +679,6 @@ Namespace CreoRegenAppVB
         Private Sub UpdateItemPanelVisibility()
             Dim isBomTab = (_tabs.SelectedIndex = BomTabIndex)
             _itemParamsPanel.Visible = isBomTab
-            _itemParamsSplitter.Visible = isBomTab
         End Sub
 
         Private Sub MainFormResized(sender As Object, e As EventArgs)
@@ -717,12 +686,7 @@ Namespace CreoRegenAppVB
         End Sub
 
         Private Sub UpdateItemPanelWidth()
-            Dim maxWidth = Math.Min(ItemPanelMaxWidth, Math.Max(ItemPanelMinWidth, Me.ClientSize.Width - ItemPanelMinExtra))
-            If _itemParamsPanel.Width < ItemPanelMinWidth Then
-                _itemParamsPanel.Width = ItemPanelMinWidth
-            ElseIf _itemParamsPanel.Width > maxWidth Then
-                _itemParamsPanel.Width = maxWidth
-            End If
+            _itemParamsPanel.Width = Math.Max(ItemPanelMinWidth, Me.ClientSize.Width \ 2)
         End Sub
 
         Private Sub ExpandAllBomClicked(sender As Object, e As EventArgs)
@@ -975,109 +939,10 @@ Namespace CreoRegenAppVB
             Next
         End Function
 
-        Private Sub LoadLayoutSettings()
-            If Not File.Exists(_layoutSettingsPath) Then
-                Return
-            End If
-
-            Dim settings = ReadLayoutSettingsFile()
-
-            Dim widthValue As Integer
-            If TryGetIntegerSetting(settings, "Form.Width", widthValue) Then
-                Width = Math.Max(MinimumSize.Width, widthValue)
-            End If
-
-            Dim heightValue As Integer
-            If TryGetIntegerSetting(settings, "Form.Height", heightValue) Then
-                Height = Math.Max(MinimumSize.Height, heightValue)
-            End If
-
-            Dim leftValue As Integer
-            Dim topValue As Integer
-            If TryGetIntegerSetting(settings, "Form.Left", leftValue) AndAlso TryGetIntegerSetting(settings, "Form.Top", topValue) Then
-                StartPosition = FormStartPosition.Manual
-                Location = New Point(Math.Max(0, leftValue), Math.Max(0, topValue))
-            End If
-
-            Dim panelWidth As Integer
-            If TryGetIntegerSetting(settings, "ItemPanel.Width", panelWidth) Then
-                _itemParamsPanel.Width = Math.Max(ItemPanelMinWidth, Math.Min(ItemPanelMaxWidth, panelWidth))
-            End If
-
-            RestoreGridColumnWidths(_paramsGrid, "ParamsGrid", settings)
-            RestoreGridColumnWidths(_itemParamsGrid, "ItemParamsGrid", settings)
-            RestoreGridColumnWidths(_bomGrid, "BomGrid", settings)
-            RestoreGridColumnWidths(_featuresGrid, "FeaturesGrid", settings)
-            RestoreGridColumnWidths(_componentsGrid, "ComponentsGrid", settings)
-        End Sub
-
-        Private Function ReadLayoutSettingsFile() As Dictionary(Of String, String)
-            Dim settings As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
-
-            For Each rawLine In File.ReadAllLines(_layoutSettingsPath)
-                Dim line = rawLine.Trim()
-                If line.Length = 0 Then
-                    Continue For
-                End If
-
-                Dim separatorIndex = line.IndexOf("="c)
-                If separatorIndex <= 0 Then
-                    Continue For
-                End If
-
-                Dim key = line.Substring(0, separatorIndex).Trim()
-                Dim value = line.Substring(separatorIndex + 1).Trim()
-                settings(key) = value
-            Next
-
-            Return settings
-        End Function
-
-        Private Shared Function TryGetIntegerSetting(settings As Dictionary(Of String, String), key As String, ByRef value As Integer) As Boolean
-            Dim rawValue As String = Nothing
-            If Not settings.TryGetValue(key, rawValue) Then
-                Return False
-            End If
-
-            Return Integer.TryParse(rawValue, value)
-        End Function
-
-        Private Sub RestoreGridColumnWidths(grid As DataGridView, prefix As String, settings As Dictionary(Of String, String))
-            For Each column As DataGridViewColumn In grid.Columns
-                Dim widthValue As Integer
-                If TryGetIntegerSetting(settings, prefix & "." & column.Name & ".Width", widthValue) Then
-                    column.Width = Math.Max(column.MinimumWidth, widthValue)
-                End If
-            Next
-        End Sub
-
-        Private Sub SaveLayoutSettings()
-            Dim directoryPath = Path.GetDirectoryName(_layoutSettingsPath)
-            If Not Directory.Exists(directoryPath) Then
-                Directory.CreateDirectory(directoryPath)
-            End If
-
-            Dim lines As New List(Of String)()
-            Dim currentBounds As Rectangle = If(WindowState = FormWindowState.Normal, Me.Bounds, RestoreBounds)
-            lines.Add("Form.Width=" & currentBounds.Width.ToString())
-            lines.Add("Form.Height=" & currentBounds.Height.ToString())
-            lines.Add("Form.Left=" & currentBounds.Left.ToString())
-            lines.Add("Form.Top=" & currentBounds.Top.ToString())
-            lines.Add("ItemPanel.Width=" & _itemParamsPanel.Width.ToString())
-
-            SaveGridColumnWidths(lines, _paramsGrid, "ParamsGrid")
-            SaveGridColumnWidths(lines, _itemParamsGrid, "ItemParamsGrid")
-            SaveGridColumnWidths(lines, _bomGrid, "BomGrid")
-            SaveGridColumnWidths(lines, _featuresGrid, "FeaturesGrid")
-            SaveGridColumnWidths(lines, _componentsGrid, "ComponentsGrid")
-
-            File.WriteAllLines(_layoutSettingsPath, lines.ToArray())
-        End Sub
-
         Private Sub ApplyDefaultLayoutSettings()
             Width = 760
             Height = 480
-            _itemParamsPanel.Width = ItemPanelMinWidth
+            _itemParamsPanel.Width = Math.Max(ItemPanelMinWidth, Width \ 2)
 
             _paramsGrid.Columns("Name").Width = 220
             _paramsGrid.Columns("Type").Width = 80
@@ -1094,37 +959,6 @@ Namespace CreoRegenAppVB
             _bomGrid.Columns("DisplayName").Width = 240
             _bomGrid.Columns("FileName").Width = 180
             _bomGrid.Columns("Descp").Width = 180
-        End Sub
-
-        Private Sub SaveLayoutClicked(sender As Object, e As EventArgs)
-            Try
-                SaveLayoutSettings()
-                AddLog("OK: Layout saved.")
-            Catch ex As Exception
-                AddLog("ERROR: Could not save layout settings: " & ex.Message)
-            End Try
-        End Sub
-
-        Private Sub ResetLayoutClicked(sender As Object, e As EventArgs)
-            Try
-                If File.Exists(_layoutSettingsPath) Then
-                    File.Delete(_layoutSettingsPath)
-                End If
-
-                StartPosition = FormStartPosition.CenterScreen
-                WindowState = FormWindowState.Normal
-                ApplyDefaultLayoutSettings()
-                UpdateItemPanelWidth()
-                AddLog("OK: Layout reset to defaults.")
-            Catch ex As Exception
-                AddLog("ERROR: Could not reset layout: " & ex.Message)
-            End Try
-        End Sub
-
-        Private Shared Sub SaveGridColumnWidths(lines As List(Of String), grid As DataGridView, prefix As String)
-            For Each column As DataGridViewColumn In grid.Columns
-                lines.Add(prefix & "." & column.Name & ".Width=" & column.Width.ToString())
-            Next
         End Sub
 
         Private Function GetDiscrName(discr As Integer) As String
@@ -1152,12 +986,6 @@ Namespace CreoRegenAppVB
         End Sub
 
         Protected Overrides Sub OnFormClosing(e As FormClosingEventArgs)
-            Try
-                SaveLayoutSettings()
-            Catch ex As Exception
-                AddLog("ERROR: Could not save layout settings: " & ex.Message)
-            End Try
-
             MyBase.OnFormClosing(e)
 
             Try
