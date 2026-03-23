@@ -46,6 +46,8 @@ Namespace CreoRegenAppVB
         Private ReadOnly _itemParamsGrid As DataGridView
         Private ReadOnly _itemSetParameterButton As Button
         Private _selectedBomModelInput As String
+        Private _suppressSelectionChanged As Boolean
+        Private _isLoadingItemParams As Boolean
 
         Friend Sub New()
             Text = "Creo Regen Toolkit (VB.NET)"
@@ -641,27 +643,34 @@ Namespace CreoRegenAppVB
         End Sub
 
         Private Sub RenderBomGrid()
-            _bomGrid.Rows.Clear()
+            _suppressSelectionChanged = True
+            Try
+                _bomGrid.Rows.Clear()
 
-            For Each row In _bomRowsAll
-                If Not IsRowVisible(row) Then
-                    Continue For
-                End If
+                For Each row In _bomRowsAll
+                    If Not IsRowVisible(row) Then
+                        Continue For
+                    End If
 
-                Dim toggleText = ""
-                If row.HasChildren Then
-                    toggleText = If(_bomCollapsedNodeIds.Contains(row.NodeId), "+", "-")
-                End If
+                    Dim toggleText = ""
+                    If row.HasChildren Then
+                        toggleText = If(_bomCollapsedNodeIds.Contains(row.NodeId), "+", "-")
+                    End If
 
-                Dim rowIndex = _bomGrid.Rows.Add(toggleText, CreateIndentedLevel(row.Level), row.DisplayName, row.FileName, row.Descp, row.BsClass)
-                _bomGrid.Rows(rowIndex).Tag = row.NodeId
-            Next
+                    Dim rowIndex = _bomGrid.Rows.Add(toggleText, CreateIndentedLevel(row.Level), row.DisplayName, row.FileName, row.Descp, row.BsClass)
+                    _bomGrid.Rows(rowIndex).Tag = row.NodeId
+                Next
+            Finally
+                _suppressSelectionChanged = False
+            End Try
 
             UpdateShowParametersButtonState()
         End Sub
 
-        Private Sub BomGridSelectionChanged(sender As Object, e As EventArgs)
+        Private Async Sub BomGridSelectionChanged(sender As Object, e As EventArgs)
             UpdateShowParametersButtonState()
+            If _suppressSelectionChanged Then Return
+            Await LoadItemParametersForSelectedRowAsync(forceReload:=False)
         End Sub
 
         Private Sub TabsSelectedIndexChanged(sender As Object, e As EventArgs)
@@ -715,7 +724,15 @@ Namespace CreoRegenAppVB
         End Sub
 
         Private Async Sub ShowItemParametersClickedAsync(sender As Object, e As EventArgs)
+            Await LoadItemParametersForSelectedRowAsync(forceReload:=True)
+        End Sub
+
+        Private Async Function LoadItemParametersForSelectedRowAsync(forceReload As Boolean) As Task
             If _bomGrid.SelectedRows.Count = 0 Then
+                Return
+            End If
+
+            If _isLoadingItemParams Then
                 Return
             End If
 
@@ -726,13 +743,17 @@ Namespace CreoRegenAppVB
             End If
 
             If String.IsNullOrWhiteSpace(modelInput) Then
-                AddLog("ERROR: Could not resolve selected item model.")
+                Return
+            End If
+
+            If Not forceReload AndAlso String.Equals(_selectedBomModelInput, modelInput, StringComparison.OrdinalIgnoreCase) Then
                 Return
             End If
 
             _selectedBomModelInput = modelInput
             _itemParamsTitle.Text = "Item Parameters - " & modelInput
 
+            _isLoadingItemParams = True
             SetBusyState(True)
             BeginItemParametersLoading(modelInput)
             Try
@@ -748,14 +769,15 @@ Namespace CreoRegenAppVB
                     _itemParamsGrid.Rows.Add(item.Name, typeName, item.ValueText, "", item.Description, item.Discr)
                 Next
 
-                AddLog("OK: Loaded selected item parameters for " & modelInput)
+                AddLog("OK: Loaded item parameters for " & modelInput)
             Catch ex As Exception
                 AddLog("ERROR: " & ex.Message)
             Finally
                 EndItemParametersLoading(modelInput)
                 SetBusyState(False)
+                _isLoadingItemParams = False
             End Try
-        End Sub
+        End Function
 
         Private Async Sub SetSelectedItemParameterClickedAsync(sender As Object, e As EventArgs)
             If String.IsNullOrWhiteSpace(_selectedBomModelInput) Then
