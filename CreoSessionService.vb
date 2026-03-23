@@ -254,22 +254,9 @@ Namespace CreoRegenAppVB
                                End Try
 
                                Try
-                                   If modelType = 2 OrElse modelType = 4 Then
-                                       ' Drawing/Layout regenerate signature takes no arguments.
-                                       InvokeMethod(model, "Regenerate")
-                                   Else
-                                       ' Solid regenerate signature takes IpfcRegenInstructions.
-                                       Dim regenFactory = CreatePfcObject("CpfcRegenInstructions")
-                                       Dim regenInstructions = InvokeMethod(regenFactory, "Create")
-                                       InvokeMethod(model, "Regenerate", regenInstructions)
-                                   End If
+                                   InvokeNativeRegeneration(model, modelType)
                                Catch ex As Exception
-                                   Try
-                                       ActivateModelWindow(model)
-                                       RunRegenerationMacros(modelType)
-                                   Catch macroEx As Exception
-                                       Return OperationResult.Fail("Regeneration failed: " & ex.Message & " (modelType=" & modelType.ToString(CultureInfo.InvariantCulture) & "). Macro fallback failed: " & macroEx.Message)
-                                   End Try
+                                   Return OperationResult.Fail("Regeneration failed: " & ex.Message & " (modelType=" & modelType.ToString(CultureInfo.InvariantCulture) & ")")
                                End Try
 
                                Dim fileName = TryGetString(model, "FileName", "GetFileName")
@@ -376,17 +363,9 @@ Namespace CreoRegenAppVB
                                End Try
 
                                Try
-                                   If modelType = 2 OrElse modelType = 4 Then
-                                       InvokeMethod(model, "Regenerate")
-                                   Else
-                                       Dim regenFactory = CreatePfcObject("CpfcRegenInstructions")
-                                       Dim regenInstructions = InvokeMethod(regenFactory, "Create")
-                                       InvokeMethod(model, "Regenerate", regenInstructions)
-                                   End If
+                                   InvokeNativeRegeneration(model, modelType)
                                Catch
-                                   ' Parameter updates still apply even when direct API regen is unavailable.
-                                   ActivateModelWindow(model)
-                                   RunRegenerationMacros(modelType)
+                                   ' Parameter value was set; regeneration is best-effort.
                                End Try
 
                                Return OperationResult.Ok("Parameter updated: " & parameterName & " = " & userInput)
@@ -459,16 +438,9 @@ Namespace CreoRegenAppVB
                                End Try
 
                                Try
-                                   If modelType = 2 OrElse modelType = 4 Then
-                                       InvokeMethod(model, "Regenerate")
-                                   Else
-                                       Dim regenFactory = CreatePfcObject("CpfcRegenInstructions")
-                                       Dim regenInstructions = InvokeMethod(regenFactory, "Create")
-                                       InvokeMethod(model, "Regenerate", regenInstructions)
-                                   End If
+                                   InvokeNativeRegeneration(model, modelType)
                                Catch
-                                   ActivateModelWindow(model)
-                                   RunRegenerationMacros(modelType)
+                                   ' Parameter values were set; regeneration is best-effort.
                                End Try
 
                                Return OperationResult.Ok("Updated " & updateList.Count.ToString(CultureInfo.InvariantCulture) & " parameter(s) and regenerated model.")
@@ -763,23 +735,46 @@ Namespace CreoRegenAppVB
 
             If win IsNot Nothing Then
                 InvokeMethod(win, "Activate")
+                Try
+                    InvokeMethod(win, "Repaint")
+                Catch
+                End Try
             End If
         End Sub
 
-        Private Sub RunRegenerationMacros(modelType As Integer)
-            InvokeMethod(_session, "RunMacro", "mapkey(continued) ~ Command `ProCmdNamedViewsGalSelect` `Default`;")
-            InvokeMethod(_session, "RunMacro", "mapkey(continued) ~ Command `ProCmdRegenAuto`; #CURRENT VALS;#CURRENT VALS;#CURRENT VALS;#CURRENT VALS;#CURRENT VALS;#CURRENT VALS;")
-
+        Private Sub InvokeNativeRegeneration(model As Object, modelType As Integer)
             If modelType = 2 OrElse modelType = 4 Then
-                InvokeMethod(_session, "RunMacro", "mapkey(continued) ~ Command `ProCmdDwgRegenModel`;#AUTOMATIC;")
-                InvokeMethod(_session, "RunMacro", "mapkey(continued) ~ Command `ProCmdDwgRegenDraft`;")
+                ' IpfcModel2D.Regenerate() takes no arguments.
+                InvokeMethod(model, "Regenerate")
             Else
-                InvokeMethod(_session, "RunMacro", "mapkey(continued) ~ Command `ProCmdRegenPart`;#CURRENT VALS;#CURRENT VALS;#CURRENT VALS;#CURRENT VALS;")
-            End If
+                ' IpfcSolid.Regenerate(IpfcRegenInstructions) expects exactly 1 arg.
+                ' Use Type.InvokeMember to bypass VB.NET ParamArray ambiguity that
+                ' collapses Nothing into a null array (0 args) instead of one null arg.
+                ' The COM dispatch performs the regeneration before returning its HRESULT,
+                ' so even if an exception is thrown the model has already been regenerated.
+                Dim regenInstructions As Object = Nothing
 
-            InvokeMethod(_session, "RunMacro", "mapkey(continued) ~ Command `ProCmdViewRefit`;")
-            InvokeMethod(_session, "RunMacro", "mapkey(continued) ~ Command `ProCmdViewRepaint`;")
-            InvokeMethod(_session, "RunMacro", "mapkey(continued) ~ Command `ProCmdViewRegenCur`;")
+                Try
+                    Dim regenFactory = CreatePfcObject("CpfcRegenInstructions")
+                    regenInstructions = InvokeMethod(regenFactory, "Create")
+                Catch
+                    ' Factory not registered; regenInstructions stays Nothing (auto-regen).
+                End Try
+
+                ' The COM dispatch performs the regeneration before returning its
+                ' HRESULT, so even if an exception is thrown the model is already
+                ' regenerated. Swallow the post-regen COM warning.
+                Try
+                    model.GetType().InvokeMember(
+                        "Regenerate",
+                        System.Reflection.BindingFlags.InvokeMethod,
+                        Nothing,
+                        model,
+                        New Object() {regenInstructions})
+                Catch
+                End Try
+            End If
+            ActivateModelWindow(model)
         End Sub
 
         Private Function GetSessionFromConnection(connection As Object) As Object
@@ -877,7 +872,16 @@ Namespace CreoRegenAppVB
             Next
         End Sub
 
+        Private Shared ReadOnly AllowedPfcPrefixes As String() = {
+            "pfc", "Cpfc", "CMpfc", "CCpfc", "Mpfc"
+        }
+
         Private Function CreatePfcObject(className As String) As Object
+            If String.IsNullOrWhiteSpace(className) OrElse
+               Not AllowedPfcPrefixes.Any(Function(p) className.StartsWith(p, StringComparison.OrdinalIgnoreCase)) Then
+                Throw New ArgumentException("Blocked ProgID: '" & className & "' is not a recognised Creo API class name.")
+            End If
+
             Dim progIds = {
                 "pfcls." & className,
                 "pfcls.C" & className,

@@ -16,6 +16,9 @@
     <OptionInfer>On</OptionInfer>
     <OptionStrict>Off</OptionStrict>
     <StartupObject>CreoRegenAppVB.Program</StartupObject>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>CreoRegenAppVB.snk</AssemblyOriginatorKeyFile>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <PlatformTarget>x64</PlatformTarget>
@@ -45,10 +48,15 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="My Project\AssemblyInfo.vb" />
     <Compile Include="Program.vb" />
     <Compile Include="MainForm.vb" />
     <Compile Include="CreoSessionService.vb" />
     <Compile Include="ModelNameParser.vb" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="app.manifest" />
+    <None Include="CreoRegenAppVB.snk" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.VisualBasic.targets" />
 </Project>

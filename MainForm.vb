@@ -45,6 +45,7 @@ Namespace CreoRegenAppVB
         Private ReadOnly _itemParamsLoadingBar As ProgressBar
         Private ReadOnly _itemParamsGrid As DataGridView
         Private ReadOnly _itemSetParameterButton As Button
+        Private ReadOnly _itemParamsCloseButton As Button
         Private _selectedBomModelInput As String
         Private _suppressSelectionChanged As Boolean
         Private _isLoadingItemParams As Boolean
@@ -296,6 +297,13 @@ Namespace CreoRegenAppVB
             levelColumn.MinimumWidth = 56
             levelColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.None
             _bomGrid.Columns.Add(levelColumn)
+            Dim featureIdColumn As New DataGridViewTextBoxColumn()
+            featureIdColumn.Name = "FeatureId"
+            featureIdColumn.HeaderText = "Feature ID"
+            featureIdColumn.Width = 70
+            featureIdColumn.MinimumWidth = 56
+            featureIdColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.None
+            _bomGrid.Columns.Add(featureIdColumn)
             Dim displayNameColumn As New DataGridViewTextBoxColumn()
             displayNameColumn.Name = "DisplayName"
             displayNameColumn.HeaderText = "Name"
@@ -314,9 +322,23 @@ Namespace CreoRegenAppVB
             Dim bsClassColumn As New DataGridViewTextBoxColumn()
             bsClassColumn.Name = "BsClass"
             bsClassColumn.HeaderText = "BS_Class"
-            bsClassColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
-            bsClassColumn.MinimumWidth = 140
+            bsClassColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.None
+            bsClassColumn.Width = 140
+            bsClassColumn.MinimumWidth = 100
             _bomGrid.Columns.Add(bsClassColumn)
+            Dim conditionsColumn As New DataGridViewTextBoxColumn()
+            conditionsColumn.Name = "Conditions"
+            conditionsColumn.HeaderText = "Conditions"
+            conditionsColumn.Width = 120
+            conditionsColumn.MinimumWidth = 80
+            conditionsColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.None
+            _bomGrid.Columns.Add(conditionsColumn)
+            Dim inheritanceColumn As New DataGridViewTextBoxColumn()
+            inheritanceColumn.Name = "Inheritance"
+            inheritanceColumn.HeaderText = "Inheritance"
+            inheritanceColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
+            inheritanceColumn.MinimumWidth = 80
+            _bomGrid.Columns.Add(inheritanceColumn)
             AddHandler _bomGrid.CellContentClick, AddressOf BomGridCellContentClick
             AddHandler _bomGrid.SelectionChanged, AddressOf BomGridSelectionChanged
 
@@ -336,10 +358,32 @@ Namespace CreoRegenAppVB
             itemPanelLayout.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
             itemPanelLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
 
+            Dim titleRow As New TableLayoutPanel()
+            titleRow.Dock = DockStyle.Fill
+            titleRow.AutoSize = True
+            titleRow.AutoSizeMode = AutoSizeMode.GrowAndShrink
+            titleRow.ColumnCount = 2
+            titleRow.RowCount = 1
+            titleRow.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100.0F))
+            titleRow.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+
             _itemParamsTitle = New Label()
             _itemParamsTitle.AutoSize = True
             _itemParamsTitle.Text = "Item Parameters"
             _itemParamsTitle.Font = New Font(Font, FontStyle.Bold)
+            _itemParamsTitle.Anchor = AnchorStyles.Left
+
+            _itemParamsCloseButton = New Button()
+            _itemParamsCloseButton.Text = ChrW(&H2716)
+            _itemParamsCloseButton.Size = New Size(24, 24)
+            _itemParamsCloseButton.FlatStyle = FlatStyle.Flat
+            _itemParamsCloseButton.FlatAppearance.BorderSize = 0
+            _itemParamsCloseButton.Cursor = Cursors.Hand
+            _itemParamsCloseButton.Anchor = AnchorStyles.Right
+            AddHandler _itemParamsCloseButton.Click, AddressOf CloseItemParametersPanel
+
+            titleRow.Controls.Add(_itemParamsTitle, 0, 0)
+            titleRow.Controls.Add(_itemParamsCloseButton, 1, 0)
 
             _itemParamsLoadingBar = New ProgressBar()
             _itemParamsLoadingBar.Dock = DockStyle.Top
@@ -386,7 +430,7 @@ Namespace CreoRegenAppVB
 
             itemPanelButtons.Controls.Add(_itemSetParameterButton)
 
-            itemPanelLayout.Controls.Add(_itemParamsTitle, 0, 0)
+            itemPanelLayout.Controls.Add(titleRow, 0, 0)
             itemPanelLayout.Controls.Add(_itemParamsLoadingBar, 0, 1)
             itemPanelLayout.Controls.Add(_itemParamsGrid, 0, 2)
             itemPanelLayout.Controls.Add(itemPanelButtons, 0, 3)
@@ -549,6 +593,7 @@ Namespace CreoRegenAppVB
 
                 RenderBomGrid()
                 UpdateShowParametersButtonState()
+                _itemParamsPanel.Visible = False
                 WindowState = FormWindowState.Maximized
 
                 _tabs.SelectedIndex = 2
@@ -657,7 +702,7 @@ Namespace CreoRegenAppVB
                         toggleText = If(_bomCollapsedNodeIds.Contains(row.NodeId), "+", "-")
                     End If
 
-                    Dim rowIndex = _bomGrid.Rows.Add(toggleText, CreateIndentedLevel(row.Level), row.DisplayName, row.FileName, row.Descp, row.BsClass)
+                    Dim rowIndex = _bomGrid.Rows.Add(toggleText, CreateIndentedLevel(row.Level), row.FeatureId.ToString(), row.DisplayName, row.FileName, row.Descp, row.BsClass, "", "")
                     _bomGrid.Rows(rowIndex).Tag = row.NodeId
                 Next
             Finally
@@ -686,8 +731,9 @@ Namespace CreoRegenAppVB
         End Sub
 
         Private Sub UpdateItemPanelVisibility()
-            Dim isBomTab = (_tabs.SelectedIndex = BomTabIndex)
-            _itemParamsPanel.Visible = isBomTab
+            If _tabs.SelectedIndex <> BomTabIndex Then
+                _itemParamsPanel.Visible = False
+            End If
         End Sub
 
         Private Sub MainFormResized(sender As Object, e As EventArgs)
@@ -724,7 +770,13 @@ Namespace CreoRegenAppVB
         End Sub
 
         Private Async Sub ShowItemParametersClickedAsync(sender As Object, e As EventArgs)
+            _itemParamsPanel.Visible = True
+            UpdateItemPanelWidth()
             Await LoadItemParametersForSelectedRowAsync(forceReload:=True)
+        End Sub
+
+        Private Sub CloseItemParametersPanel(sender As Object, e As EventArgs)
+            _itemParamsPanel.Visible = False
         End Sub
 
         Private Async Function LoadItemParametersForSelectedRowAsync(forceReload As Boolean) As Task
@@ -843,7 +895,7 @@ Namespace CreoRegenAppVB
 
                 Try
                     Using writer As New StreamWriter(dialog.FileName, False, Encoding.UTF8)
-                        Dim headers As String() = {"Level", "Name", "File Name", "Descp", "BS_Class"}
+                        Dim headers As String() = {"Level", "Feature ID", "Name", "File Name", "Descp", "BS_Class", "Conditions", "Inheritance"}
                         writer.WriteLine(String.Join(",", EscapeCsvValues(headers)))
 
                         For Each row As DataGridViewRow In _bomGrid.Rows
@@ -853,10 +905,13 @@ Namespace CreoRegenAppVB
 
                             Dim values As String() = {
                                 Convert.ToString(row.Cells("Level").Value),
+                                Convert.ToString(row.Cells("FeatureId").Value),
                                 Convert.ToString(row.Cells("DisplayName").Value),
                                 Convert.ToString(row.Cells("FileName").Value),
                                 Convert.ToString(row.Cells("Descp").Value),
-                                Convert.ToString(row.Cells("BsClass").Value)
+                                Convert.ToString(row.Cells("BsClass").Value),
+                                Convert.ToString(row.Cells("Conditions").Value),
+                                Convert.ToString(row.Cells("Inheritance").Value)
                             }
                             writer.WriteLine(String.Join(",", EscapeCsvValues(values)))
                         Next
