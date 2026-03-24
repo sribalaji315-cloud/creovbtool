@@ -65,6 +65,8 @@ Responsibilities:
 Responsibilities:
 
 - Validate model input text.
+- Enforce maximum name length (260 characters).
+- Reject unsupported file extensions via a strict whitelist (ASM, DRW, PRT, MFG, FRM, LAY, DGM, SEC, SKF).
 - Strip version suffixes where present.
 - Detect explicit extensions and map model type hints.
 - Produce normalized file name candidates.
@@ -221,7 +223,10 @@ Purpose:
 Behavior:
 
 - Validates assembly requirement.
-- Recursively traverses child components.
+- Recursively traverses child components with safety limits:
+  - Maximum recursion depth (32 levels).
+  - Maximum total node count (10,000 nodes).
+  - Circular reference detection via visited-model tracking on the current path.
 - Captures level, feature ID, display name, file name, and key metadata such as DESCP and BS_CLASS.
 - Includes placeholder Conditions and Inheritance columns for future user-defined data.
 - Flattens hierarchy into parent-linked rows for grid rendering.
@@ -229,6 +234,7 @@ Behavior:
 User Value:
 
 - Assembly structure visibility with engineering metadata context.
+- Protection against stack overflow on cyclic or extremely deep assemblies.
 
 ### 7.9 BOM Expand/Collapse and Visibility Filtering
 
@@ -255,11 +261,14 @@ Purpose:
 Behavior:
 
 - Includes Level, Feature ID, Name, File Name, Descp, BS_Class, Conditions, and Inheritance columns.
-- Escapes CSV values safely.
+- Escapes CSV values safely (double-quoting, CRLF stripping).
+- Neutralizes formula injection by prefixing cells starting with =, +, -, or @ with a leading apostrophe.
+- Validates export path: rejects UNC/network paths, alternate data streams, non-.csv extensions, and directories outside the allowed list (Documents, Desktop, Downloads, Temp).
 
 User Value:
 
 - Easy downstream sharing and analysis.
+- Exported CSV files are safe to open in Excel without formula injection risk.
 
 ### 7.11 Item Parameter Panel (BOM Context)
 
@@ -321,8 +330,10 @@ The parser and service together support flexible model input:
 - Normalizes extension case and known model kinds.
 - Tries common extension order when extension is omitted.
 - Strips version suffixes before descriptor creation.
+- Enforces a strict extension whitelist (ASM, DRW, PRT, MFG, FRM, LAY, DGM, SEC, SKF); unknown extensions are rejected.
+- Enforces maximum name length (260 characters).
 
-This increases retrieval success for real-world naming patterns.
+This increases retrieval success for real-world naming patterns while rejecting invalid or potentially dangerous inputs.
 
 ## 9. COM Integration Strategy
 
@@ -331,18 +342,32 @@ Integration is intentionally late-bound to reduce deployment coupling.
 Key points:
 
 - Uses ProgID-based object creation with fallback variants.
+- All COM ProgIDs are validated against an explicit whitelist (`AllowedProgIds` HashSet) before instantiation. Only known Creo API ProgIDs (pfcls.*, pfc.*) are permitted.
+- Each short class name maps to a fixed set of candidate ProgIDs via `GetAllowedProgIdCandidates`; unknown class names return an empty set and are rejected.
+- Class name inputs are further checked by `IsSafeCreoClassName` to contain only letters and digits.
 - Uses guarded property/method invocation wrappers.
 - Applies defensive fallbacks for collection access, descriptors, and metadata retrieval.
-- Restricts created classes to expected Creo API prefix patterns.
 
-This design improves compatibility across different Creo API registration environments.
+This design improves compatibility across different Creo API registration environments while preventing arbitrary COM object instantiation.
 
 ## 10. Error Handling and Resilience
 
 - Service methods return explicit fail results rather than throwing to UI for expected operational failures.
-- Exceptions are converted into user-facing error messages with context.
+- User-facing error messages are generic ("The operation failed.") to prevent information disclosure. `ArgumentException` messages are passed through since they contain only validation text authored by application code.
+- Full diagnostic details (exception type, message, stack trace, inner exceptions up to depth 10) are written to `Trace` for developer diagnostics but never shown in the UI.
+- The MainForm uses `HandleUnexpectedError` for all Catch blocks, which delegates to `LogApplicationError` and displays a generic message.
 - Many COM calls use fallback patterns to tolerate interface variance.
 - Regeneration after parameter set is best-effort to preserve value updates even if regen warning/errors occur.
+
+## 10.1 Input Validation Summary
+
+Model name input is validated at two layers:
+
+1. **UI layer** (`MainForm.ValidateModelInput`): rejects empty input, length > 260, path separators (`\`, `/`), traversal sequences (`..`), and control characters. Applied to all event handlers before any service call.
+2. **Service layer** (`CreoSessionService.ValidateModelIdentifier`): enforces the same constraints plus invalid filename characters. Acts as a defense-in-depth backstop.
+3. **Parser layer** (`ModelNameParser.Parse`): enforces max length, extension whitelist, and version suffix stripping.
+
+Export path validation (`ValidateExportPath`) additionally rejects UNC paths, alternate data streams, non-.csv extensions, and directories outside the allowed list.
 
 ## 11. UI Layout Summary
 

@@ -13,6 +13,8 @@ Namespace CreoRegenAppVB
 
         Private Const BomTabIndex As Integer = 2
         Private Const ItemPanelMinWidth As Integer = 320
+        Private Const MaxCsvFilenameLength As Integer = 255
+        Private Const GenericUiErrorMessage As String = "The operation could not be completed."
 
         Private ReadOnly _service As CreoSessionService
 
@@ -40,6 +42,7 @@ Namespace CreoRegenAppVB
         Private ReadOnly _bomRowsAll As List(Of BomGridRowItem)
         Private ReadOnly _bomRowsByNodeId As Dictionary(Of Integer, BomGridRowItem)
         Private ReadOnly _bomCollapsedNodeIds As HashSet(Of Integer)
+        Private ReadOnly _allowedExportDirectories As List(Of String)
         Private ReadOnly _itemParamsPanel As Panel
         Private ReadOnly _itemParamsTitle As Label
         Private ReadOnly _itemParamsLoadingBar As ProgressBar
@@ -63,6 +66,8 @@ Namespace CreoRegenAppVB
             _bomRowsAll = New List(Of BomGridRowItem)()
             _bomRowsByNodeId = New Dictionary(Of Integer, BomGridRowItem)()
             _bomCollapsedNodeIds = New HashSet(Of Integer)()
+            _allowedExportDirectories = New List(Of String)()
+            InitializeExportDirectories()
             Dim root As New TableLayoutPanel()
             root.Dock = DockStyle.Fill
             root.Padding = New Padding(10)
@@ -474,6 +479,136 @@ Namespace CreoRegenAppVB
             AddLog("Example: B00001341 or B00001341.PRT or myassy.ASM")
         End Sub
 
+        Private Sub InitializeExportDirectories()
+            _allowedExportDirectories.Clear()
+            AddAllowedExportDirectory(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments))
+            AddAllowedExportDirectory(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory))
+
+            Dim downloadsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")
+            AddAllowedExportDirectory(downloadsPath)
+            AddAllowedExportDirectory(Path.GetTempPath())
+        End Sub
+
+        Private Sub AddAllowedExportDirectory(directoryPath As String)
+            If String.IsNullOrWhiteSpace(directoryPath) Then
+                Return
+            End If
+
+            If Not Directory.Exists(directoryPath) Then
+                Return
+            End If
+
+            Dim normalizedPath = NormalizeDirectoryPath(directoryPath)
+            For Each allowedPath In _allowedExportDirectories
+                If String.Equals(allowedPath, normalizedPath, StringComparison.OrdinalIgnoreCase) Then
+                    Return
+                End If
+            Next
+
+            _allowedExportDirectories.Add(normalizedPath)
+        End Sub
+
+        Private Function NormalizeDirectoryPath(directoryPath As String) As String
+            Return Path.GetFullPath(directoryPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+        End Function
+
+        Private Function ValidateExportPath(filePath As String) As Tuple(Of Boolean, String)
+            If String.IsNullOrWhiteSpace(filePath) Then
+                Return Tuple.Create(False, "Choose a CSV export location.")
+            End If
+
+            Dim fullPath As String
+            Try
+                fullPath = Path.GetFullPath(filePath.Trim())
+            Catch
+                Return Tuple.Create(False, "Choose a valid CSV export location.")
+            End Try
+
+            If fullPath.StartsWith("\\", StringComparison.Ordinal) Then
+                Return Tuple.Create(False, "CSV export must use a local folder.")
+            End If
+
+            Dim directoryPath = Path.GetDirectoryName(fullPath)
+            If String.IsNullOrWhiteSpace(directoryPath) OrElse Not Directory.Exists(directoryPath) Then
+                Return Tuple.Create(False, "Choose an existing CSV export folder.")
+            End If
+
+            If Not IsAllowedExportDirectory(directoryPath) Then
+                Return Tuple.Create(False, "CSV export is limited to Documents, Desktop, Downloads, or Temp.")
+            End If
+
+            Dim fileName = Path.GetFileName(fullPath)
+            If String.IsNullOrWhiteSpace(fileName) Then
+                Return Tuple.Create(False, "Choose a CSV file name.")
+            End If
+
+            If fileName.Length > MaxCsvFilenameLength Then
+                Return Tuple.Create(False, "The CSV file name is too long.")
+            End If
+
+            If fileName.Contains(":"c) Then
+                Return Tuple.Create(False, "The CSV file name is invalid.")
+            End If
+
+            If fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 Then
+                Return Tuple.Create(False, "The CSV file name is invalid.")
+            End If
+
+            If Not String.Equals(Path.GetExtension(fullPath), ".csv", StringComparison.OrdinalIgnoreCase) Then
+                Return Tuple.Create(False, "CSV export requires a .csv file name.")
+            End If
+
+            Return Tuple.Create(True, fullPath)
+        End Function
+
+        Private Function IsAllowedExportDirectory(directoryPath As String) As Boolean
+            Dim normalizedDirectory = NormalizeDirectoryPath(directoryPath)
+            For Each allowedDirectory In _allowedExportDirectories
+                If String.Equals(normalizedDirectory, allowedDirectory, StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+
+                If normalizedDirectory.StartsWith(allowedDirectory & Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+            Next
+
+            Return False
+        End Function
+
+        Private Sub HandleUnexpectedError(context As String, ex As Exception, Optional userMessage As String = Nothing)
+            CreoSessionService.LogApplicationError(context, ex)
+            AddLog("ERROR: " & If(String.IsNullOrWhiteSpace(userMessage), GenericUiErrorMessage, userMessage))
+        End Sub
+
+        Private Function ValidateModelInput(ByRef modelInput As String) As Boolean
+            If String.IsNullOrWhiteSpace(modelInput) Then
+                AddLog("ERROR: Enter a model name.")
+                Return False
+            End If
+
+            modelInput = modelInput.Trim()
+
+            If modelInput.Length > 260 Then
+                AddLog("ERROR: Model name is too long.")
+                Return False
+            End If
+
+            If modelInput.IndexOf("\"c) >= 0 OrElse modelInput.IndexOf("/"c) >= 0 OrElse modelInput.Contains("..") Then
+                AddLog("ERROR: Enter a Creo model name, not a file path.")
+                Return False
+            End If
+
+            For Each ch In modelInput
+                If Char.IsControl(ch) Then
+                    AddLog("ERROR: Model name contains invalid characters.")
+                    Return False
+                End If
+            Next
+
+            Return True
+        End Function
+
         Private Async Sub ConnectClickedAsync(sender As Object, e As EventArgs)
             Await RunOperationAsync(
                 Async Function()
@@ -488,16 +623,19 @@ Namespace CreoRegenAppVB
 
         Private Async Sub RetrieveClickedAsync(sender As Object, e As EventArgs)
             Dim modelInput = _modelNameTextBox.Text
+            If Not ValidateModelInput(modelInput) Then Return
             Await RunOperationAsync(Function() _service.RetrieveModelAsync(modelInput), "Retrieve")
         End Sub
 
         Private Async Sub RegenerateClickedAsync(sender As Object, e As EventArgs)
             Dim modelInput = _modelNameTextBox.Text
+            If Not ValidateModelInput(modelInput) Then Return
             Await RunOperationAsync(Function() _service.RegenerateModelAsync(modelInput), "Regenerate")
         End Sub
 
         Private Async Sub LoadParametersClickedAsync(sender As Object, e As EventArgs)
             Dim modelInput = _modelNameTextBox.Text
+            If Not ValidateModelInput(modelInput) Then Return
             SetBusyState(True)
             Try
                 AddLog("Load Parameters started...")
@@ -516,7 +654,7 @@ Namespace CreoRegenAppVB
                 _tabs.SelectedIndex = 1
                 AddLog("OK: " & result.Message)
             Catch ex As Exception
-                AddLog("ERROR: " & ex.Message)
+                HandleUnexpectedError("Load Parameters", ex)
             Finally
                 SetBusyState(False)
             End Try
@@ -524,6 +662,7 @@ Namespace CreoRegenAppVB
 
         Private Async Sub LoadFeaturesClickedAsync(sender As Object, e As EventArgs)
             Dim modelInput = _modelNameTextBox.Text
+            If Not ValidateModelInput(modelInput) Then Return
             SetBusyState(True)
             Try
                 AddLog("Load Features started...")
@@ -541,7 +680,7 @@ Namespace CreoRegenAppVB
                 _tabs.SelectedIndex = 2 ' Activate Features tab
                 AddLog("OK: " & result.Message)
             Catch ex As Exception
-                AddLog("ERROR: " & ex.Message)
+                HandleUnexpectedError("Load Features", ex)
             Finally
                 SetBusyState(False)
             End Try
@@ -549,6 +688,7 @@ Namespace CreoRegenAppVB
 
         Private Async Sub LoadComponentsClickedAsync(sender As Object, e As EventArgs)
             Dim modelInput = _modelNameTextBox.Text
+            If Not ValidateModelInput(modelInput) Then Return
             SetBusyState(True)
             Try
                 AddLog("Load Components started...")
@@ -566,7 +706,7 @@ Namespace CreoRegenAppVB
                 _tabs.SelectedIndex = 3
                 AddLog("OK: " & result.Message)
             Catch ex As Exception
-                AddLog("ERROR: " & ex.Message)
+                HandleUnexpectedError("Load Components", ex)
             Finally
                 SetBusyState(False)
             End Try
@@ -574,6 +714,7 @@ Namespace CreoRegenAppVB
 
         Private Async Sub BuildBomClickedAsync(sender As Object, e As EventArgs)
             Dim modelInput = _modelNameTextBox.Text
+            If Not ValidateModelInput(modelInput) Then Return
             SetBusyState(True)
             Try
                 AddLog("Build BOM started...")
@@ -599,7 +740,7 @@ Namespace CreoRegenAppVB
                 _tabs.SelectedIndex = 2
                 AddLog("OK: " & result.Message)
             Catch ex As Exception
-                AddLog("ERROR: " & ex.Message)
+                HandleUnexpectedError("Build BOM", ex)
             Finally
                 SetBusyState(False)
             End Try
@@ -613,6 +754,7 @@ Namespace CreoRegenAppVB
             End If
 
             Dim modelInput = _modelNameTextBox.Text
+            If Not ValidateModelInput(modelInput) Then Return
             SetBusyState(True)
             Try
                 AddLog("Set Parameters started...")
@@ -627,7 +769,7 @@ Namespace CreoRegenAppVB
                 _tabs.SelectedIndex = 1
                 AddLog("OK: " & result.Message)
             Catch ex As Exception
-                AddLog("ERROR: " & ex.Message)
+                HandleUnexpectedError("Set Parameters", ex)
             Finally
                 SetBusyState(False)
             End Try
@@ -644,7 +786,7 @@ Namespace CreoRegenAppVB
                     AddLog("ERROR: " & result.Message)
                 End If
             Catch ex As Exception
-                AddLog("ERROR: " & ex.Message)
+                HandleUnexpectedError(actionName, ex)
             Finally
                 SetBusyState(False)
             End Try
@@ -823,7 +965,7 @@ Namespace CreoRegenAppVB
 
                 AddLog("OK: Loaded item parameters for " & modelInput)
             Catch ex As Exception
-                AddLog("ERROR: " & ex.Message)
+                HandleUnexpectedError("Load Item Parameters", ex)
             Finally
                 EndItemParametersLoading(modelInput)
                 SetBusyState(False)
@@ -855,7 +997,7 @@ Namespace CreoRegenAppVB
                     AddLog("ERROR: " & result.Message)
                 End If
             Catch ex As Exception
-                AddLog("ERROR: " & ex.Message)
+                HandleUnexpectedError("Set Item Parameters", ex)
             Finally
                 SetBusyState(False)
             End Try
@@ -888,13 +1030,23 @@ Namespace CreoRegenAppVB
                 dialog.Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*"
                 dialog.Title = "Export BOM CSV"
                 dialog.FileName = "bom-hierarchy.csv"
+                dialog.DefaultExt = "csv"
+                dialog.AddExtension = True
+                dialog.CheckPathExists = True
+                dialog.OverwritePrompt = True
 
                 If dialog.ShowDialog(Me) <> DialogResult.OK Then
                     Return
                 End If
 
+                Dim validationResult = ValidateExportPath(dialog.FileName)
+                If Not validationResult.Item1 Then
+                    AddLog("ERROR: " & validationResult.Item2)
+                    Return
+                End If
+
                 Try
-                    Using writer As New StreamWriter(dialog.FileName, False, Encoding.UTF8)
+                    Using writer As New StreamWriter(validationResult.Item2, False, Encoding.UTF8)
                         Dim headers As String() = {"Level", "Feature ID", "Name", "File Name", "Descp", "BS_Class", "Conditions", "Inheritance"}
                         writer.WriteLine(String.Join(",", EscapeCsvValues(headers)))
 
@@ -919,7 +1071,7 @@ Namespace CreoRegenAppVB
 
                     AddLog("OK: BOM CSV exported.")
                 Catch ex As Exception
-                    AddLog("ERROR: CSV export failed: " & ex.Message)
+                    HandleUnexpectedError("BOM CSV export", ex, "Unable to export the BOM CSV.")
                 End Try
             End Using
         End Sub
@@ -928,6 +1080,23 @@ Namespace CreoRegenAppVB
             Dim escaped As New List(Of String)()
             For Each value In values
                 Dim text = If(value, String.Empty)
+                text = text.Replace(vbCrLf, " ")
+                text = text.Replace(vbCr, " ")
+                text = text.Replace(vbLf, " ")
+                text = text.Replace(vbTab, " ")
+
+                Dim firstSignificantIndex As Integer = 0
+                While firstSignificantIndex < text.Length AndAlso text(firstSignificantIndex) = " "c
+                    firstSignificantIndex += 1
+                End While
+
+                If firstSignificantIndex < text.Length Then
+                    Select Case text(firstSignificantIndex)
+                        Case "="c, "+"c, "-"c, "@"c
+                            text = "'" & text
+                    End Select
+                End If
+
                 text = text.Replace("""", """""")
                 escaped.Add("""" & text & """")
             Next

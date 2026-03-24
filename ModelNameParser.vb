@@ -17,6 +17,12 @@ Namespace CreoRegenAppVB
     End Class
 
     Friend NotInheritable Class ModelNameParser
+        Private Const MaxNameLength As Integer = 260
+
+        Private Shared ReadOnly AllowedExtensions As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+            "ASM", "DRW", "PRT", "MFG", "FRM", "LAY", "DGM", "SEC", "SKF"
+        }
+
         Private Sub New()
         End Sub
 
@@ -26,6 +32,10 @@ Namespace CreoRegenAppVB
             End If
 
             Dim trimmed = rawInput.Trim()
+            If trimmed.Length > MaxNameLength Then
+                Throw New ArgumentException("Model name exceeds maximum length.")
+            End If
+
             Dim versionless = StripVersionSuffix(trimmed)
             Dim dot = versionless.LastIndexOf("."c)
             If dot <= 0 Then
@@ -42,6 +52,10 @@ Namespace CreoRegenAppVB
             Dim ext = versionless.Substring(dot + 1).Trim().ToUpperInvariant()
             If modelName.Length = 0 Then
                 Throw New ArgumentException("Model name is empty.")
+            End If
+
+            If Not AllowedExtensions.Contains(ext) Then
+                Throw New ArgumentException("Unsupported model extension: ." & ext.ToLowerInvariant())
             End If
 
             Select Case ext

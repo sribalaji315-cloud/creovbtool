@@ -1,7 +1,9 @@
 Imports System
 Imports System.Collections.Concurrent
 Imports System.Collections.Generic
+Imports System.Diagnostics
 Imports System.Globalization
+Imports System.IO
 Imports System.Threading
 Imports System.Threading.Tasks
 
@@ -138,6 +140,11 @@ Namespace CreoRegenAppVB
     Friend Class CreoSessionService
         Implements IDisposable
 
+        Private Const MaxModelIdentifierLength As Integer = 255
+        Private Const MaxBomDepth As Integer = 32
+        Private Const MaxBomNodes As Integer = 10000
+        Private Const UserFacingTechnicalErrorMessage As String = "The operation failed."
+
         Private Shared ReadOnly _extensionKindMap As Dictionary(Of String, CreoModelKind) =
             New Dictionary(Of String, CreoModelKind)(StringComparer.OrdinalIgnoreCase) From {
                 {"PRT", CreoModelKind.Part},
@@ -153,6 +160,25 @@ Namespace CreoRegenAppVB
 
         Private Shared ReadOnly _defaultExtensionOrder As String() = {
             "PRT", "ASM", "DRW", "MFG", "FRM", "LAY", "DGM", "SEC", "SKF"
+        }
+
+        Private Shared ReadOnly AllowedProgIds As HashSet(Of String) = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+            "pfcls.pfcAsyncConnection",
+            "pfcls.CpfcAsyncConnection",
+            "pfc.pfcAsyncConnection",
+            "pfcls.pfcModelDescriptor",
+            "pfcls.CpfcModelDescriptor",
+            "pfc.pfcModelDescriptor",
+            "pfcls.CpfcRegenInstructions",
+            "pfcls.CCpfcRegenInstructions",
+            "pfcls.CMpfcRegenInstructions",
+            "pfc.CpfcRegenInstructions",
+            "pfcls.CMpfcModelItem",
+            "pfcls.MpfcModelItem",
+            "pfc.MpfcModelItem",
+            "pfcls.pfcModelItem",
+            "pfcls.CpfcModelItem",
+            "pfc.pfcModelItem"
         }
 
         Private ReadOnly _queue As BlockingCollection(Of Action)
@@ -592,7 +618,9 @@ Namespace CreoRegenAppVB
                                       Return BomQueryResult.Fail("BOM hierarchy requires an assembly model.")
                                   End If
 
-                                  Dim rootNode = BuildBomNode(model, ResolveModelDisplayName(model, rootFileName), rootFileName, -1, 0)
+                                  Dim totalNodeCount As Integer = 0
+                                  Dim visitedModels As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+                                  Dim rootNode = BuildBomNode(model, ResolveModelDisplayName(model, rootFileName), rootFileName, -1, 0, totalNodeCount, visitedModels)
                                   Dim rows = New List(Of BomGridRowItem)()
                                   Dim nextNodeId As Integer = 1
                                   FlattenBomNode(rootNode, rows, 0, nextNodeId)
@@ -603,6 +631,7 @@ Namespace CreoRegenAppVB
 
         Private Function TryRetrieveModel(parsed As ParsedModelName, ByRef resolved As ParsedModelName) As Object
             resolved = Nothing
+            ValidateParsedModelName(parsed)
 
             For Each candidate In BuildCandidateNames(parsed)
                 Try
@@ -630,8 +659,15 @@ Namespace CreoRegenAppVB
                         Return
                     End If
 
+                    ValidateModelIdentifier(safeBase, "model name")
+
                     Dim safeExt = If(ext, String.Empty).Trim().ToUpperInvariant()
+                    If safeExt.Length > 0 Then
+                        ValidateModelIdentifier(safeExt, "model extension")
+                    End If
+
                     Dim fileName = If(safeExt.Length = 0, safeBase, safeBase & "." & safeExt.ToLowerInvariant())
+                    ValidateModelIdentifier(fileName, "model file name")
                     If seen.Contains(fileName) Then
                         Return
                     End If
@@ -670,6 +706,48 @@ Namespace CreoRegenAppVB
 
             Return CreoModelKind.Unknown
         End Function
+
+        Private Sub ValidateParsedModelName(parsed As ParsedModelName)
+            If parsed Is Nothing Then
+                Throw New ArgumentException("Model name is empty.")
+            End If
+
+            ValidateModelIdentifier(parsed.Name, "model name")
+            ValidateModelIdentifier(parsed.FileName, "model file name")
+
+            If parsed.HasExplicitExtension Then
+                ValidateModelIdentifier(parsed.Ext, "model extension")
+            End If
+        End Sub
+
+        Private Sub ValidateModelIdentifier(value As String, displayName As String)
+            Dim trimmed = If(value, String.Empty).Trim()
+            If trimmed.Length = 0 Then
+                Throw New ArgumentException("The " & displayName & " is empty.")
+            End If
+
+            If trimmed.Length > MaxModelIdentifierLength Then
+                Throw New ArgumentException("The " & displayName & " is too long.")
+            End If
+
+            If Path.IsPathRooted(trimmed) OrElse trimmed.StartsWith("\\", StringComparison.Ordinal) OrElse trimmed.StartsWith("//", StringComparison.Ordinal) Then
+                Throw New ArgumentException("Model input must be a Creo model name, not a file path.")
+            End If
+
+            If trimmed.Contains("..") OrElse trimmed.IndexOf("\"c) >= 0 OrElse trimmed.IndexOf("/"c) >= 0 Then
+                Throw New ArgumentException("Model input must be a Creo model name, not a file path.")
+            End If
+
+            If trimmed.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 Then
+                Throw New ArgumentException("The " & displayName & " contains invalid characters.")
+            End If
+
+            For Each ch In trimmed
+                If Char.IsControl(ch) Then
+                    Throw New ArgumentException("The " & displayName & " contains invalid characters.")
+                End If
+            Next
+        End Sub
 
         Friend Function DisconnectAsync() As Task(Of OperationResult)
             Return Enqueue(Function()
@@ -796,7 +874,8 @@ Namespace CreoRegenAppVB
                            Try
                                tcs.TrySetResult(work())
                            Catch ex As Exception
-                               tcs.TrySetResult(OperationResult.Fail("CREO ERROR: " & ex.Message))
+                               LogApplicationError("OperationResult queue execution", ex)
+                               tcs.TrySetResult(OperationResult.Fail(GetUserFacingErrorMessage(ex)))
                            End Try
                        End Sub)
             Return tcs.Task
@@ -812,7 +891,8 @@ Namespace CreoRegenAppVB
                            Try
                                tcs.TrySetResult(work())
                            Catch ex As Exception
-                               tcs.TrySetResult(ParameterQueryResult.Fail("CREO ERROR: " & ex.Message))
+                               LogApplicationError("ParameterQueryResult queue execution", ex)
+                               tcs.TrySetResult(ParameterQueryResult.Fail(GetUserFacingErrorMessage(ex)))
                            End Try
                        End Sub)
             Return tcs.Task
@@ -828,7 +908,8 @@ Namespace CreoRegenAppVB
                            Try
                                tcs.TrySetResult(work())
                            Catch ex As Exception
-                               tcs.TrySetResult(FeatureQueryResult.Fail("CREO ERROR: " & ex.Message))
+                               LogApplicationError("FeatureQueryResult queue execution", ex)
+                               tcs.TrySetResult(FeatureQueryResult.Fail(GetUserFacingErrorMessage(ex)))
                            End Try
                        End Sub)
             Return tcs.Task
@@ -844,7 +925,8 @@ Namespace CreoRegenAppVB
                            Try
                                tcs.TrySetResult(work())
                            Catch ex As Exception
-                               tcs.TrySetResult(ComponentQueryResult.Fail("CREO ERROR: " & ex.Message))
+                               LogApplicationError("ComponentQueryResult queue execution", ex)
+                               tcs.TrySetResult(ComponentQueryResult.Fail(GetUserFacingErrorMessage(ex)))
                            End Try
                        End Sub)
             Return tcs.Task
@@ -860,7 +942,8 @@ Namespace CreoRegenAppVB
                            Try
                                tcs.TrySetResult(work())
                            Catch ex As Exception
-                               tcs.TrySetResult(BomQueryResult.Fail("CREO ERROR: " & ex.Message))
+                               LogApplicationError("BomQueryResult queue execution", ex)
+                               tcs.TrySetResult(BomQueryResult.Fail(GetUserFacingErrorMessage(ex)))
                            End Try
                        End Sub)
             Return tcs.Task
@@ -872,31 +955,63 @@ Namespace CreoRegenAppVB
             Next
         End Sub
 
-        Private Shared ReadOnly AllowedPfcPrefixes As String() = {
-            "pfc", "Cpfc", "CMpfc", "CCpfc", "Mpfc"
-        }
-
         Private Function CreatePfcObject(className As String) As Object
-            If String.IsNullOrWhiteSpace(className) OrElse
-               Not AllowedPfcPrefixes.Any(Function(p) className.StartsWith(p, StringComparison.OrdinalIgnoreCase)) Then
-                Throw New ArgumentException("Blocked ProgID: '" & className & "' is not a recognised Creo API class name.")
+            Dim progIds = GetAllowedProgIdCandidates(className)
+            If progIds.Length = 0 Then
+                Throw New ArgumentException("Requested Creo COM class is not allowed.")
             End If
 
-            Dim progIds = {
-                "pfcls." & className,
-                "pfcls.C" & className,
-                "pfc." & className,
-                className
-            }
-
             For Each progId In progIds
+                If Not AllowedProgIds.Contains(progId) Then
+                    Continue For
+                End If
+
                 Try
-                    Return Activator.CreateInstance(Type.GetTypeFromProgID(progId, throwOnError:=True))
+                    Dim progType = Type.GetTypeFromProgID(progId, throwOnError:=False)
+                    If progType IsNot Nothing Then
+                        Return Activator.CreateInstance(progType)
+                    End If
                 Catch
                 End Try
             Next
 
-            Throw New InvalidOperationException("Unable to create Creo COM object for " & className & ". Run vb_api_register.bat and verify COM registration.")
+            Throw New InvalidOperationException("Unable to create the required Creo COM object. Run vb_api_register.bat and verify COM registration.")
+        End Function
+
+        Private Function GetAllowedProgIdCandidates(className As String) As String()
+            Dim normalized = If(className, String.Empty).Trim()
+            If Not IsSafeCreoClassName(normalized) Then
+                Return New String() {}
+            End If
+
+            Select Case normalized
+                Case "pfcAsyncConnection"
+                    Return New String() {"pfcls.pfcAsyncConnection", "pfcls.CpfcAsyncConnection", "pfc.pfcAsyncConnection"}
+                Case "pfcModelDescriptor"
+                    Return New String() {"pfcls.pfcModelDescriptor", "pfcls.CpfcModelDescriptor", "pfc.pfcModelDescriptor"}
+                Case "CpfcRegenInstructions"
+                    Return New String() {"pfcls.CpfcRegenInstructions", "pfcls.CCpfcRegenInstructions", "pfcls.CMpfcRegenInstructions", "pfc.CpfcRegenInstructions"}
+                Case "MpfcModelItem"
+                    Return New String() {"pfcls.CMpfcModelItem", "pfcls.MpfcModelItem", "pfc.MpfcModelItem"}
+                Case "pfcModelItem"
+                    Return New String() {"pfcls.pfcModelItem", "pfcls.CpfcModelItem", "pfc.pfcModelItem"}
+                Case Else
+                    Return New String() {}
+            End Select
+        End Function
+
+        Private Function IsSafeCreoClassName(className As String) As Boolean
+            If String.IsNullOrWhiteSpace(className) Then
+                Return False
+            End If
+
+            For Each ch In className
+                If Not Char.IsLetterOrDigit(ch) Then
+                    Return False
+                End If
+            Next
+
+            Return True
         End Function
 
         Private Function GetProperty(instance As Object, propertyName As String) As Object
@@ -942,6 +1057,36 @@ Namespace CreoRegenAppVB
             Catch
                 Return Nothing
             End Try
+        End Function
+
+        Private Shared Function GetUserFacingErrorMessage(ex As Exception) As String
+            If TypeOf ex Is ArgumentException Then
+                Return ex.Message
+            End If
+
+            Return UserFacingTechnicalErrorMessage
+        End Function
+
+        Friend Shared Sub LogApplicationError(context As String, ex As Exception)
+            Dim detail = BuildDiagnosticMessage(context, ex)
+            Trace.WriteLine(detail)
+        End Sub
+
+        Private Shared Function BuildDiagnosticMessage(context As String, ex As Exception) As String
+            Dim lines As New List(Of String)()
+            lines.Add("Context: " & If(context, String.Empty))
+
+            Dim current = ex
+            Dim depth As Integer = 0
+            While current IsNot Nothing AndAlso depth < 10
+                lines.Add("Exception[" & depth.ToString(CultureInfo.InvariantCulture) & "]: " & current.GetType().FullName)
+                lines.Add("Message[" & depth.ToString(CultureInfo.InvariantCulture) & "]: " & current.Message)
+                lines.Add("Stack[" & depth.ToString(CultureInfo.InvariantCulture) & "]: " & If(current.StackTrace, String.Empty))
+                current = current.InnerException
+                depth += 1
+            End While
+
+            Return String.Join(Environment.NewLine, lines.ToArray())
         End Function
 
         Private Function TryGetString(instance As Object, propertyName As String, methodName As String) As String
@@ -1070,7 +1215,9 @@ Namespace CreoRegenAppVB
             Return Nothing
         End Function
 
-        Private Function BuildBomNode(model As Object, displayName As String, fileName As String, featureId As Integer, depth As Integer) As BomNodeItem
+        Private Function BuildBomNode(model As Object, displayName As String, fileName As String, featureId As Integer, depth As Integer, ByRef totalNodeCount As Integer, visitedModels As HashSet(Of String)) As BomNodeItem
+            totalNodeCount += 1
+
             Dim node As New BomNodeItem With {
                 .Level = depth,
                 .FeatureId = featureId,
@@ -1082,7 +1229,11 @@ Namespace CreoRegenAppVB
                 .Children = New List(Of BomNodeItem)()
             }
 
-            If depth >= 32 Then
+            If depth >= MaxBomDepth Then
+                Return node
+            End If
+
+            If totalNodeCount >= MaxBomNodes Then
                 Return node
             End If
 
@@ -1123,7 +1274,18 @@ Namespace CreoRegenAppVB
                 }
 
                 If childModel IsNot Nothing AndAlso IsAssemblyModel(childModel, childFileName) Then
-                    childNode = BuildBomNode(childModel, childDisplayName, childFileName, GetFeatureId(feat), depth + 1)
+                    Dim normalizedChildKey = If(childFileName, String.Empty).ToUpperInvariant()
+                    If Not String.IsNullOrEmpty(normalizedChildKey) AndAlso visitedModels.Contains(normalizedChildKey) Then
+                        ' Circular reference detected — do not recurse
+                    ElseIf totalNodeCount < MaxBomNodes Then
+                        If Not String.IsNullOrEmpty(normalizedChildKey) Then
+                            visitedModels.Add(normalizedChildKey)
+                        End If
+                        childNode = BuildBomNode(childModel, childDisplayName, childFileName, GetFeatureId(feat), depth + 1, totalNodeCount, visitedModels)
+                        If Not String.IsNullOrEmpty(normalizedChildKey) Then
+                            visitedModels.Remove(normalizedChildKey)
+                        End If
+                    End If
                 End If
 
                 node.Children.Add(childNode)
