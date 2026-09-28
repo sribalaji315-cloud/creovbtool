@@ -33,6 +33,7 @@ Namespace CreoRegenAppVB
         Private ReadOnly _showItemParametersButton As Button
         Private ReadOnly _setParameterButton As Button
         Private ReadOnly _clearLogButton As Button
+        Private ReadOnly _activateButton As Button
         Private ReadOnly _outputTextBox As TextBox
         Private ReadOnly _tabs As TabControl
         Private ReadOnly _paramsGrid As DataGridView
@@ -52,9 +53,11 @@ Namespace CreoRegenAppVB
         Private _selectedBomModelInput As String
         Private _suppressSelectionChanged As Boolean
         Private _isLoadingItemParams As Boolean
+        Private _licenseStatus As LicenseStatus
 
-        Friend Sub New()
-            Text = "Creo Regen Toolkit (VB.NET)"
+        Friend Sub New(status As LicenseStatus)
+            _licenseStatus = status
+            Text = BuildWindowTitle(status)
             Width = 760
             Height = 480
             MinimumSize = New Size(560, 360)
@@ -177,6 +180,13 @@ Namespace CreoRegenAppVB
             _clearLogButton.Margin = New Padding(2)
             AddHandler _clearLogButton.Click, Sub(sender, args) _outputTextBox.Clear()
 
+            _activateButton = New Button()
+            _activateButton.Text = "Activate"
+            _activateButton.AutoSize = True
+            _activateButton.Margin = New Padding(2)
+            _activateButton.Visible = status.State <> LicenseState.Licensed
+            AddHandler _activateButton.Click, AddressOf ActivateClicked
+
             modelRow.Controls.Add(_modelLabel, 0, 0)
             modelRow.Controls.Add(_modelNameTextBox, 1, 0)
 
@@ -201,7 +211,8 @@ Namespace CreoRegenAppVB
                 _collapseAllBomButton,
                 _showItemParametersButton,
                 _setParameterButton,
-                _clearLogButton
+                _clearLogButton,
+                _activateButton
             }
 
             For index = 0 To topButtons.Length - 1
@@ -476,7 +487,7 @@ Namespace CreoRegenAppVB
             UpdateItemPanelVisibility()
 
             AddLog("UI ready.")
-            AddLog("Example: B00001341 or B00001341.PRT or myassy.ASM")
+            AddLog("Example: model or model.prt or myassy.asm")
         End Sub
 
         Private Sub InitializeExportDirectories()
@@ -1118,8 +1129,33 @@ Namespace CreoRegenAppVB
             _showItemParametersButton.Enabled = Not isBusy AndAlso _tabs.SelectedIndex = BomTabIndex AndAlso _bomGrid.SelectedRows.Count > 0
             _setParameterButton.Enabled = Not isBusy
             _clearLogButton.Enabled = Not isBusy
+            _activateButton.Enabled = Not isBusy
             _itemSetParameterButton.Enabled = Not isBusy
             _itemParamsGrid.Enabled = Not isBusy
+        End Sub
+
+        Private Shared Function BuildWindowTitle(status As LicenseStatus) As String
+            If status Is Nothing OrElse status.State = LicenseState.Licensed Then
+                Return "BOMForge"
+            End If
+
+            Return "BOMForge - Trial: " & status.DaysRemaining.ToString() &
+                   If(status.DaysRemaining = 1, " day", " days") & " remaining"
+        End Function
+
+        Private Sub ActivateClicked(sender As Object, e As EventArgs)
+            Using dialog As New ActivationForm(_licenseStatus)
+                dialog.ShowDialog(Me)
+
+                If dialog.ResultStatus.State <> LicenseState.Licensed Then
+                    Return
+                End If
+
+                _licenseStatus = dialog.ResultStatus
+                Text = BuildWindowTitle(_licenseStatus)
+                _activateButton.Visible = False
+                AddLog("OK: BOMForge is licensed to " & _licenseStatus.Licensee & ".")
+            End Using
         End Sub
 
         Private Sub BeginItemParametersLoading(modelInput As String)
@@ -1233,6 +1269,8 @@ Namespace CreoRegenAppVB
 
         Protected Overrides Sub OnFormClosing(e As FormClosingEventArgs)
             MyBase.OnFormClosing(e)
+
+            LicenseManager.RecordHeartbeat()
 
             Try
                 _service.Dispose()

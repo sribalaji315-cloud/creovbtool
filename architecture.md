@@ -1,8 +1,8 @@
-# Creo Regen Toolkit Architecture
+# BOMForge Architecture
 
 ## 1. Purpose
 
-Creo Regen Toolkit is a Windows desktop utility that helps engineering users connect to Creo Parametric, retrieve models, regenerate models, inspect model metadata, edit parameters, and work with assembly BOM hierarchies from one interface.
+BOMForge is a Windows desktop utility that helps engineering users connect to Creo Parametric, retrieve models, regenerate models, inspect model metadata, edit parameters, and work with assembly BOM hierarchies from one interface.
 
 The tool is designed to reduce repetitive Creo UI actions and provide a safer, structured workflow for common model operations.
 
@@ -28,6 +28,8 @@ The solution follows a simple layered design:
   - Event handlers coordinate UI state, call service methods, and map results to grids.
 - Integration Layer
   - Creo session service encapsulates COM connection, late-bound API invocation, and model operations.
+- Licensing Layer
+  - Resolves the user's entitlement before any UI is shown, and verifies license keys offline.
 - Utility Layer
   - Model name parser normalizes user input and extension handling.
 
@@ -36,7 +38,11 @@ The solution follows a simple layered design:
 ### 4.1 Program Entry
 
 - Starts the application in STA mode.
-- Initializes visual styles and launches the main form.
+- Initializes visual styles.
+- Evaluates the license/trial status and gates startup:
+  - Licensed: brief splash, then the main form.
+  - Trial: activation dialog with the option to continue, then the main form.
+  - Expired: activation dialog only; the main form is never created unless a valid key is entered.
 
 ### 4.2 Main Form (UI + Workflow Control)
 
@@ -70,6 +76,30 @@ Responsibilities:
 - Strip version suffixes where present.
 - Detect explicit extensions and map model type hints.
 - Produce normalized file name candidates.
+
+### 4.5 Licensing
+
+Two components, plus an out-of-band key generator.
+
+`LicenseFormat` defines the key wire format and is compiled into both the application and the key generator:
+
+- Payload: format version, 8-byte license ID, issue date, licensee name.
+- Signature: ECDSA P-256 over SHA-256, appended to the payload.
+- Encoding: Crockford Base32 in dashed 5-character groups; decoding is case-insensitive and tolerant of whitespace.
+- Only the public key is embedded in the application, so a decompiled binary cannot be used to mint keys.
+- All rejection paths return one generic message so the dialog cannot be used as a validation oracle.
+
+`LicenseManager` resolves the current entitlement:
+
+- An installed key at `%APPDATA%\BOMForge\license.lic`, re-verified on every launch (no persisted "activated" flag).
+- Otherwise a 30-day trial, mirrored to `HKCU\Software\BOMForge\Settings` and `%APPDATA%\BOMForge\state.dat`.
+- Mirrors are reconciled by earliest start and latest sighting, so deleting one does not reset the trial.
+- Each record is HMAC-SHA256 protected with a key derived from the user's SID, so records do not transfer between users.
+- A 24-hour tolerance absorbs benign clock drift; beyond that, backwards clock movement or an edited record ends the trial.
+
+`BOMForgeKeyGen` (in `keygen\`, built separately and never shipped) holds the private key, DPAPI-encrypted under the issuer's Windows account, and logs every issued key.
+
+The signing scheme prevents key forgery. The trial check is unobfuscated .NET IL and is a deterrent only.
 
 ## 5. Concurrency and Threading Model
 

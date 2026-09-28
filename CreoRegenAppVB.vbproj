@@ -51,6 +51,10 @@
     <Compile Include="My Project\AssemblyInfo.vb" />
     <Compile Include="Program.vb" />
     <Compile Include="MainForm.vb" />
+    <Compile Include="ActivationForm.vb" />
+    <Compile Include="SplashForm.vb" />
+    <Compile Include="LicenseFormat.vb" />
+    <Compile Include="LicenseManager.vb" />
     <Compile Include="CreoSessionService.vb" />
     <Compile Include="ModelNameParser.vb" />
   </ItemGroup>

@@ -1,10 +1,10 @@
 Imports System.Reflection
 Imports System.Runtime.InteropServices
 
-<Assembly: AssemblyTitle("CreoRegenAppVB")>
-<Assembly: AssemblyDescription("Creo Regeneration Toolkit — WinForms application for Creo Parametric model regeneration and parameter management via the Creo VB API.")>
+<Assembly: AssemblyTitle("BOMForge")>
+<Assembly: AssemblyDescription("BOMForge — WinForms application for Creo Parametric BOM exploration, model regeneration, and parameter management via the Creo VB API.")>
 <Assembly: AssemblyCompany("Creo Engineering Tools")>
-<Assembly: AssemblyProduct("Creo Regen Toolkit")>
+<Assembly: AssemblyProduct("BOMForge")>
 <Assembly: AssemblyCopyright("Copyright © 2026 Creo Engineering Tools")>
 <Assembly: AssemblyTrademark("")>
 
