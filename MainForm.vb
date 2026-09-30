@@ -13,6 +13,7 @@ Namespace CreoRegenAppVB
 
         Private Const BomTabIndex As Integer = 2
         Private Const ItemPanelMinWidth As Integer = 320
+        Private Const ToolbarGroupGap As Integer = 16
         Private Const MaxCsvFilenameLength As Integer = 255
         Private Const GenericUiErrorMessage As String = "The operation could not be completed."
 
@@ -23,6 +24,8 @@ Namespace CreoRegenAppVB
         Private ReadOnly _connectButton As Button
         Private ReadOnly _retrieveButton As Button
         Private ReadOnly _regenerateButton As Button
+        Private ReadOnly _exportFormatComboBox As ComboBox
+        Private ReadOnly _exportModelButton As Button
         Private ReadOnly _loadParametersButton As Button
         Private ReadOnly _loadFeaturesButton As Button
         Private ReadOnly _loadComponentsButton As Button
@@ -30,6 +33,9 @@ Namespace CreoRegenAppVB
         Private ReadOnly _exportBomButton As Button
         Private ReadOnly _expandAllBomButton As Button
         Private ReadOnly _collapseAllBomButton As Button
+        Private ReadOnly _applyConfigButton As Button
+        Private ReadOnly _saveRulesButton As Button
+        Private ReadOnly _hideExcludedButton As Button
         Private ReadOnly _showItemParametersButton As Button
         Private ReadOnly _setParameterButton As Button
         Private ReadOnly _clearLogButton As Button
@@ -54,6 +60,11 @@ Namespace CreoRegenAppVB
         Private _suppressSelectionChanged As Boolean
         Private _isLoadingItemParams As Boolean
         Private _licenseStatus As LicenseStatus
+        Private _hideExcluded As Boolean
+        Private ReadOnly _strikeoutFont As Font
+        Private _paramsModelInput As String
+        Private _bomModelInput As String
+        Private _bomTopFileName As String
 
         Friend Sub New(status As LicenseStatus)
             _licenseStatus = status
@@ -62,6 +73,7 @@ Namespace CreoRegenAppVB
             Height = 480
             MinimumSize = New Size(560, 360)
             StartPosition = FormStartPosition.CenterScreen
+            Font = New Font("Segoe UI", 9.0F)
             SetStyle(ControlStyles.OptimizedDoubleBuffer Or ControlStyles.AllPaintingInWmPaint, True)
             UpdateStyles()
 
@@ -104,29 +116,19 @@ Namespace CreoRegenAppVB
             _modelNameTextBox.Width = 260
             _modelNameTextBox.Anchor = AnchorStyles.Left Or AnchorStyles.Right
 
-            _connectButton = New Button()
-            _connectButton.Text = "Connect"
-            _connectButton.AutoSize = True
-            _connectButton.Margin = New Padding(2)
-            AddHandler _connectButton.Click, AddressOf ConnectClickedAsync
+            _connectButton = CreateToolbarButton("Connect", AddressOf ConnectClickedAsync)
+            _retrieveButton = CreateToolbarButton("Retrieve", AddressOf RetrieveClickedAsync)
+            _regenerateButton = CreateToolbarButton("Regenerate", AddressOf RegenerateClickedAsync)
 
-            _retrieveButton = New Button()
-            _retrieveButton.Text = "Retrieve"
-            _retrieveButton.AutoSize = True
-            _retrieveButton.Margin = New Padding(2)
-            AddHandler _retrieveButton.Click, AddressOf RetrieveClickedAsync
+            _exportFormatComboBox = New ComboBox()
+            _exportFormatComboBox.DropDownStyle = ComboBoxStyle.DropDownList
+            _exportFormatComboBox.Items.AddRange(New Object() {"PDF", "DXF", "STEP", "IGES"})
+            _exportFormatComboBox.SelectedIndex = 0
+            _exportFormatComboBox.Width = 80
+            _exportFormatComboBox.Margin = New Padding(ToolbarGroupGap, 5, 3, 3)
 
-            _regenerateButton = New Button()
-            _regenerateButton.Text = "Regenerate"
-            _regenerateButton.AutoSize = True
-            _regenerateButton.Margin = New Padding(2)
-            AddHandler _regenerateButton.Click, AddressOf RegenerateClickedAsync
-
-            _loadParametersButton = New Button()
-            _loadParametersButton.Text = "Load Params"
-            _loadParametersButton.AutoSize = True
-            _loadParametersButton.Margin = New Padding(2)
-            AddHandler _loadParametersButton.Click, AddressOf LoadParametersClickedAsync
+            _exportModelButton = CreateToolbarButton("Export Model", AddressOf ExportModelClickedAsync)
+            _loadParametersButton = CreateToolbarButton("Load Params", AddressOf LoadParametersClickedAsync)
 
             _loadFeaturesButton = New Button()
             _loadFeaturesButton.Text = "Load Features"
@@ -136,98 +138,48 @@ Namespace CreoRegenAppVB
             _loadComponentsButton.Text = "Load Components"
             AddHandler _loadComponentsButton.Click, AddressOf LoadComponentsClickedAsync
 
-            _buildBomButton = New Button()
-            _buildBomButton.Text = "Build BOM"
-            _buildBomButton.AutoSize = True
-            _buildBomButton.Margin = New Padding(2)
-            AddHandler _buildBomButton.Click, AddressOf BuildBomClickedAsync
+            _buildBomButton = CreateToolbarButton("Build BOM", AddressOf BuildBomClickedAsync)
+            _expandAllBomButton = CreateToolbarButton("Expand", AddressOf ExpandAllBomClicked)
+            _collapseAllBomButton = CreateToolbarButton("Collapse", AddressOf CollapseAllBomClicked)
+            _hideExcludedButton = CreateToolbarButton("Hide Excluded", AddressOf HideExcludedClicked)
 
-            _exportBomButton = New Button()
-            _exportBomButton.Text = "Export CSV"
-            _exportBomButton.AutoSize = True
-            _exportBomButton.Margin = New Padding(2)
-            AddHandler _exportBomButton.Click, AddressOf ExportBomClicked
+            _applyConfigButton = CreateToolbarButton("Apply Config", AddressOf ApplyConfigClicked)
+            _applyConfigButton.Margin = New Padding(ToolbarGroupGap, 3, 3, 3)
+            _saveRulesButton = CreateToolbarButton("Save Rules", AddressOf SaveRulesClickedAsync)
 
-            _expandAllBomButton = New Button()
-            _expandAllBomButton.Text = "Expand"
-            _expandAllBomButton.AutoSize = True
-            _expandAllBomButton.Margin = New Padding(2)
-            AddHandler _expandAllBomButton.Click, AddressOf ExpandAllBomClicked
-
-            _collapseAllBomButton = New Button()
-            _collapseAllBomButton.Text = "Collapse"
-            _collapseAllBomButton.AutoSize = True
-            _collapseAllBomButton.Margin = New Padding(2)
-            AddHandler _collapseAllBomButton.Click, AddressOf CollapseAllBomClicked
-
-            _showItemParametersButton = New Button()
-            _showItemParametersButton.Text = "Show Params"
+            _exportBomButton = CreateToolbarButton("Export CSV", AddressOf ExportBomClicked)
+            _exportBomButton.Margin = New Padding(ToolbarGroupGap, 3, 3, 3)
+            _showItemParametersButton = CreateToolbarButton("Show Params", AddressOf ShowItemParametersClickedAsync)
             _showItemParametersButton.Visible = False
             _showItemParametersButton.Enabled = False
-            _showItemParametersButton.AutoSize = True
-            _showItemParametersButton.Margin = New Padding(2)
-            AddHandler _showItemParametersButton.Click, AddressOf ShowItemParametersClickedAsync
 
-            _setParameterButton = New Button()
-            _setParameterButton.Text = "Set"
-            _setParameterButton.AutoSize = True
-            _setParameterButton.Margin = New Padding(2)
-            AddHandler _setParameterButton.Click, AddressOf SetSelectedParameterClickedAsync
+            _setParameterButton = CreateToolbarButton("Set", AddressOf SetSelectedParameterClickedAsync)
+            _clearLogButton = CreateToolbarButton("Clear Log", Sub(sender, args) _outputTextBox.Clear())
 
-            _clearLogButton = New Button()
-            _clearLogButton.Text = "Clear Log"
-            _clearLogButton.AutoSize = True
-            _clearLogButton.Margin = New Padding(2)
-            AddHandler _clearLogButton.Click, Sub(sender, args) _outputTextBox.Clear()
-
-            _activateButton = New Button()
-            _activateButton.Text = "Activate"
-            _activateButton.AutoSize = True
-            _activateButton.Margin = New Padding(2)
+            _activateButton = CreateToolbarButton("Activate", AddressOf ActivateClicked)
+            _activateButton.Margin = New Padding(ToolbarGroupGap, 3, 3, 3)
             _activateButton.Visible = status.State <> LicenseState.Licensed
-            AddHandler _activateButton.Click, AddressOf ActivateClicked
 
             modelRow.Controls.Add(_modelLabel, 0, 0)
             modelRow.Controls.Add(_modelNameTextBox, 1, 0)
 
-            Dim buttonGrid As New TableLayoutPanel()
-            buttonGrid.AutoSize = True
-            buttonGrid.AutoSizeMode = AutoSizeMode.GrowAndShrink
-            buttonGrid.ColumnCount = 5
-            buttonGrid.RowCount = 1
-            buttonGrid.Dock = DockStyle.Top
-            For index = 0 To 4
-                buttonGrid.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
-            Next
-
-            Dim topButtons As Button() = {
+            Dim globalBar As New FlowLayoutPanel()
+            globalBar.Dock = DockStyle.Fill
+            globalBar.AutoSize = True
+            globalBar.AutoSizeMode = AutoSizeMode.GrowAndShrink
+            globalBar.WrapContents = True
+            globalBar.Margin = New Padding(0, 6, 0, 0)
+            globalBar.Controls.AddRange(New Control() {
                 _connectButton,
                 _retrieveButton,
                 _regenerateButton,
-                _loadParametersButton,
-                _buildBomButton,
-                _exportBomButton,
-                _expandAllBomButton,
-                _collapseAllBomButton,
-                _showItemParametersButton,
-                _setParameterButton,
-                _clearLogButton,
+                _exportFormatComboBox,
+                _exportModelButton,
                 _activateButton
-            }
-
-            For index = 0 To topButtons.Length - 1
-                Dim rowIndex = index \ 5
-                Dim columnIndex = index Mod 5
-                While buttonGrid.RowCount <= rowIndex
-                    buttonGrid.RowCount += 1
-                    buttonGrid.RowStyles.Add(New RowStyle(SizeType.AutoSize))
-                End While
-
-                buttonGrid.Controls.Add(topButtons(index), columnIndex, rowIndex)
-            Next
+            })
 
             top.Controls.Add(modelRow, 0, 0)
-            top.Controls.Add(buttonGrid, 0, 1)
+            top.Controls.Add(globalBar, 0, 1)
 
             _outputTextBox = New TextBox()
             _outputTextBox.Multiline = True
@@ -299,7 +251,9 @@ Namespace CreoRegenAppVB
             _bomGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect
             _bomGrid.MultiSelect = False
             _bomGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None
-            _bomGrid.ReadOnly = True
+            _bomGrid.ReadOnly = False
+            _bomGrid.EditMode = DataGridViewEditMode.EditOnKeystrokeOrF2
+            _bomGrid.ShowCellToolTips = True
             Dim toggleColumn As New DataGridViewButtonColumn()
             toggleColumn.Name = "Toggle"
             toggleColumn.HeaderText = ""
@@ -345,8 +299,9 @@ Namespace CreoRegenAppVB
             Dim conditionsColumn As New DataGridViewTextBoxColumn()
             conditionsColumn.Name = "Conditions"
             conditionsColumn.HeaderText = "Conditions"
-            conditionsColumn.Width = 120
+            conditionsColumn.Width = 220
             conditionsColumn.MinimumWidth = 80
+            conditionsColumn.MaxInputLength = BomRuleLimits.MaxRuleLength
             conditionsColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.None
             _bomGrid.Columns.Add(conditionsColumn)
             Dim inheritanceColumn As New DataGridViewTextBoxColumn()
@@ -354,7 +309,19 @@ Namespace CreoRegenAppVB
             inheritanceColumn.HeaderText = "Inheritance"
             inheritanceColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
             inheritanceColumn.MinimumWidth = 80
+            inheritanceColumn.MaxInputLength = BomRuleLimits.MaxRuleLength
             _bomGrid.Columns.Add(inheritanceColumn)
+            Dim resolvedColumn As New DataGridViewTextBoxColumn()
+            resolvedColumn.Name = "Resolved"
+            resolvedColumn.HeaderText = "Resolved Values"
+            resolvedColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
+            resolvedColumn.MinimumWidth = 80
+            _bomGrid.Columns.Add(resolvedColumn)
+            For Each column As DataGridViewColumn In _bomGrid.Columns
+                column.ReadOnly = column IsNot conditionsColumn AndAlso column IsNot inheritanceColumn
+            Next
+            _strikeoutFont = New Font(_bomGrid.Font, FontStyle.Strikeout)
+            AddHandler _bomGrid.CellEndEdit, AddressOf BomGridCellEndEdit
             AddHandler _bomGrid.CellContentClick, AddressOf BomGridCellContentClick
             AddHandler _bomGrid.SelectionChanged, AddressOf BomGridSelectionChanged
 
@@ -455,14 +422,12 @@ Namespace CreoRegenAppVB
             _tabs = New TabControl()
             _tabs.Dock = DockStyle.Fill
 
-            Dim logTab As New TabPage("Log")
-            logTab.Controls.Add(_outputTextBox)
-
-            Dim paramsTab As New TabPage("Parameters")
-            paramsTab.Controls.Add(_paramsGrid)
-
-            Dim bomTab As New TabPage("BOM")
-            bomTab.Controls.Add(_bomGrid)
+            Dim logTab = CreateToolbarTabPage("Log", _outputTextBox, _clearLogButton)
+            Dim paramsTab = CreateToolbarTabPage("Parameters", _paramsGrid, _loadParametersButton, _setParameterButton)
+            Dim bomTab = CreateToolbarTabPage("BOM", _bomGrid,
+                _buildBomButton, _expandAllBomButton, _collapseAllBomButton, _hideExcludedButton,
+                _applyConfigButton, _saveRulesButton,
+                _exportBomButton, _showItemParametersButton)
 
             _tabs.TabPages.Add(logTab)
             _tabs.TabPages.Add(paramsTab)
@@ -470,11 +435,11 @@ Namespace CreoRegenAppVB
             AddHandler _tabs.SelectedIndexChanged, AddressOf TabsSelectedIndexChanged
             AddHandler Me.Resize, AddressOf MainFormResized
 
-            EnableDoubleBuffering(_paramsGrid)
-            EnableDoubleBuffering(_featuresGrid)
-            EnableDoubleBuffering(_componentsGrid)
-            EnableDoubleBuffering(_bomGrid)
-            EnableDoubleBuffering(_itemParamsGrid)
+            For Each grid In New DataGridView() {_paramsGrid, _featuresGrid, _componentsGrid, _bomGrid, _itemParamsGrid}
+                EnableDoubleBuffering(grid)
+                grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize
+                grid.RowTemplate.Height = grid.Font.Height + 8
+            Next
 
             root.Controls.Add(top, 0, 0)
             root.Controls.Add(_tabs, 0, 1)
@@ -489,6 +454,40 @@ Namespace CreoRegenAppVB
             AddLog("UI ready.")
             AddLog("Example: model or model.prt or myassy.asm")
         End Sub
+
+        Private Shared Function CreateToolbarButton(text As String, handler As EventHandler) As Button
+            Dim button As New Button()
+            button.Text = text
+            button.AutoSize = True
+            button.MinimumSize = New Size(88, 28)
+            button.Padding = New Padding(6, 0, 6, 0)
+            button.Margin = New Padding(3)
+            AddHandler button.Click, handler
+            Return button
+        End Function
+
+        Private Shared Function CreateToolbarTabPage(title As String, content As Control, ParamArray tools As Control()) As TabPage
+            Dim toolbar As New FlowLayoutPanel()
+            toolbar.Dock = DockStyle.Fill
+            toolbar.AutoSize = True
+            toolbar.AutoSizeMode = AutoSizeMode.GrowAndShrink
+            toolbar.WrapContents = True
+            toolbar.Padding = New Padding(2, 4, 2, 2)
+            toolbar.Controls.AddRange(tools)
+
+            Dim pageLayout As New TableLayoutPanel()
+            pageLayout.Dock = DockStyle.Fill
+            pageLayout.ColumnCount = 1
+            pageLayout.RowCount = 2
+            pageLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            pageLayout.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
+            pageLayout.Controls.Add(toolbar, 0, 0)
+            pageLayout.Controls.Add(content, 0, 1)
+
+            Dim page As New TabPage(title)
+            page.Controls.Add(pageLayout)
+            Return page
+        End Function
 
         Private Sub InitializeExportDirectories()
             _allowedExportDirectories.Clear()
@@ -644,6 +643,26 @@ Namespace CreoRegenAppVB
             Await RunOperationAsync(Function() _service.RegenerateModelAsync(modelInput), "Regenerate")
         End Sub
 
+        Private Async Sub ExportModelClickedAsync(sender As Object, e As EventArgs)
+            Dim modelInput = _modelNameTextBox.Text
+            If _tabs.SelectedIndex = BomTabIndex AndAlso _bomGrid.SelectedRows.Count > 0 Then
+                Dim selectedRow = _bomGrid.SelectedRows(0)
+                Dim rowModel = Convert.ToString(selectedRow.Cells("FileName").Value)
+                If String.IsNullOrWhiteSpace(rowModel) Then
+                    rowModel = Convert.ToString(selectedRow.Cells("DisplayName").Value)
+                End If
+                If Not String.IsNullOrWhiteSpace(rowModel) Then
+                    modelInput = rowModel
+                End If
+            End If
+
+            If Not ValidateModelInput(modelInput) Then Return
+
+            Dim formatName = Convert.ToString(_exportFormatComboBox.SelectedItem)
+            Dim format = CType([Enum].Parse(GetType(ModelExportFormat), formatName, True), ModelExportFormat)
+            Await RunOperationAsync(Function() _service.ExportModelAsync(modelInput, format), "Export " & formatName & " (" & modelInput & ")")
+        End Sub
+
         Private Async Sub LoadParametersClickedAsync(sender As Object, e As EventArgs)
             Dim modelInput = _modelNameTextBox.Text
             If Not ValidateModelInput(modelInput) Then Return
@@ -661,6 +680,7 @@ Namespace CreoRegenAppVB
                     Dim typeName = GetDiscrName(item.Discr)
                     _paramsGrid.Rows.Add(item.Name, typeName, item.ValueText, "", item.Description, item.Discr)
                 Next
+                _paramsModelInput = modelInput
 
                 _tabs.SelectedIndex = 1
                 AddLog("OK: " & result.Message)
@@ -742,6 +762,11 @@ Namespace CreoRegenAppVB
                     _bomRowsAll.Add(row)
                     _bomRowsByNodeId(row.NodeId) = row
                 Next
+                _bomModelInput = modelInput
+                _bomTopFileName = If(result.Rows.Count > 0, result.Rows(0).FileName, modelInput)
+
+                AddLog("OK: " & result.Message)
+                Await LoadRulesForCurrentBomAsync()
 
                 RenderBomGrid()
                 UpdateShowParametersButtonState()
@@ -749,13 +774,209 @@ Namespace CreoRegenAppVB
                 WindowState = FormWindowState.Maximized
 
                 _tabs.SelectedIndex = 2
-                AddLog("OK: " & result.Message)
             Catch ex As Exception
                 HandleUnexpectedError("Build BOM", ex)
             Finally
                 SetBusyState(False)
             End Try
         End Sub
+
+        Private Async Function LoadRulesForCurrentBomAsync() As Task
+            Dim pathResult = Await ResolveRulesPathAsync()
+            If Not pathResult.Item1 Then
+                AddLog("WARN: BOM rules not loaded. " & pathResult.Item2)
+                Return
+            End If
+
+            If Not File.Exists(pathResult.Item2) Then
+                AddLog("No saved BOM rules found (" & Path.GetFileName(pathResult.Item2) & ").")
+                Return
+            End If
+
+            Try
+                Dim ruleFile = BomRulesStore.Load(pathResult.Item2)
+                Dim warnings As New List(Of String)()
+                Dim applied = BomRulesStore.ApplyToRows(ruleFile, _bomRowsAll, warnings)
+                For Each warning In warnings
+                    AddLog("WARN: " & warning)
+                Next
+                AddLog("OK: Loaded " & applied.ToString() & " BOM rule(s) from " & Path.GetFileName(pathResult.Item2) & ". Click Apply Config to evaluate.")
+            Catch ex As BomRuleException
+                AddLog("ERROR: " & ex.Message)
+            Catch ex As Exception
+                HandleUnexpectedError("Load BOM rules", ex, "Unable to read the BOM rules file.")
+            End Try
+        End Function
+
+        Private Async Function ResolveRulesPathAsync() As Task(Of Tuple(Of Boolean, String))
+            Dim dirResult = Await _service.GetWorkingDirectoryAsync()
+            If Not dirResult.Success Then
+                Return Tuple.Create(False, dirResult.Message)
+            End If
+
+            Return BomRulesStore.BuildRulesPath(dirResult.Message, _bomTopFileName)
+        End Function
+
+        Private Async Sub ApplyConfigClicked(sender As Object, e As EventArgs)
+            _bomGrid.EndEdit()
+            If _bomRowsAll.Count = 0 Then
+                AddLog("ERROR: Build the BOM before applying the configuration.")
+                Return
+            End If
+
+            If _paramsGrid.Rows.Count = 0 Then
+                AddLog("ERROR: Load Params for the top-level model before applying the configuration.")
+                Return
+            End If
+
+            If Not String.Equals(NormalizeModelKey(_paramsModelInput), NormalizeModelKey(_bomModelInput), StringComparison.OrdinalIgnoreCase) Then
+                AddLog("WARN: Parameters were loaded for '" & _paramsModelInput & "' but the BOM is for '" & _bomModelInput & "'.")
+            End If
+
+            Dim selectedParams As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+            For Each gridRow As DataGridViewRow In _paramsGrid.Rows
+                If gridRow.IsNewRow Then
+                    Continue For
+                End If
+
+                Dim paramName = Convert.ToString(gridRow.Cells("Name").Value)
+                If String.IsNullOrWhiteSpace(paramName) Then
+                    Continue For
+                End If
+
+                Dim newValue = Convert.ToString(gridRow.Cells("NewValue").Value)
+                selectedParams(paramName.Trim()) = If(String.IsNullOrWhiteSpace(newValue), Convert.ToString(gridRow.Cells("Value").Value), newValue.Trim())
+            Next
+
+            Try
+                Dim summary = BomConfigEvaluator.Evaluate(_bomRowsAll, selectedParams)
+                RenderBomGrid()
+
+                Const MaxLoggedErrors As Integer = 20
+                Dim logged = 0
+                For Each row In _bomRowsAll
+                    If logged >= MaxLoggedErrors Then
+                        AddLog("WARN: ... more rule errors (see red cells).")
+                        Exit For
+                    End If
+                    If row.ConditionError IsNot Nothing Then
+                        AddLog("WARN: " & row.FileName & " [" & row.FeaturePath & "] Condition: " & row.ConditionError)
+                        logged += 1
+                    End If
+                    If row.InheritanceError IsNot Nothing Then
+                        AddLog("WARN: " & row.FileName & " [" & row.FeaturePath & "] Inheritance: " & row.InheritanceError)
+                        logged += 1
+                    End If
+                Next
+
+                AddLog("OK: Config applied - " & summary.IncludedCount.ToString() & " included, " &
+                       summary.ExcludedCount.ToString() & " excluded, " & summary.ErrorCount.ToString() & " row(s) with rule errors.")
+
+                Await SyncComponentVisibilityAsync()
+            Catch ex As Exception
+                HandleUnexpectedError("Apply Config", ex)
+            End Try
+        End Sub
+
+        ' Every component is sent so each owning assembly is unhidden first; only the topmost excluded ones are re-hidden.
+        Private Async Function SyncComponentVisibilityAsync() As Task
+            Dim items As New List(Of ComponentVisibilityItem)()
+            For Each row In _bomRowsAll
+                If row.ParentNodeId = 0 OrElse String.IsNullOrEmpty(row.FeaturePath) Then
+                    Continue For
+                End If
+
+                Dim parentRow As BomGridRowItem = Nothing
+                Dim parentExcluded = _bomRowsByNodeId.TryGetValue(row.ParentNodeId, parentRow) AndAlso parentRow.IsExcluded
+
+                items.Add(New ComponentVisibilityItem With {
+                    .FeaturePath = row.FeaturePath,
+                    .Hide = row.IsExcluded AndAlso Not parentExcluded,
+                    .Label = row.FileName & " [" & row.FeaturePath & "]"
+                })
+            Next
+
+            If items.Count = 0 Then
+                Return
+            End If
+
+            SetBusyState(True)
+            Try
+                Dim result = Await _service.ApplyComponentVisibilityAsync(_bomModelInput, items)
+                AddLog(If(result.Success, "OK: ", "WARN: ") & result.Message)
+            Finally
+                SetBusyState(False)
+            End Try
+        End Function
+
+        Private Async Sub SaveRulesClickedAsync(sender As Object, e As EventArgs)
+            _bomGrid.EndEdit()
+            If _bomRowsAll.Count = 0 Then
+                AddLog("ERROR: Build the BOM before saving rules.")
+                Return
+            End If
+
+            SetBusyState(True)
+            Try
+                Dim pathResult = Await ResolveRulesPathAsync()
+                If Not pathResult.Item1 Then
+                    AddLog("ERROR: " & pathResult.Item2)
+                    Return
+                End If
+
+                Dim ruleFile = BomRulesStore.CreateFromRows(_bomTopFileName, _bomRowsAll)
+                BomRulesStore.Save(pathResult.Item2, ruleFile)
+                AddLog("OK: Saved " & ruleFile.Rules.Count.ToString() & " BOM rule(s) to " & pathResult.Item2)
+            Catch ex As Exception
+                HandleUnexpectedError("Save BOM rules", ex, "Unable to save the BOM rules file.")
+            Finally
+                SetBusyState(False)
+            End Try
+        End Sub
+
+        Private Sub HideExcludedClicked(sender As Object, e As EventArgs)
+            _bomGrid.EndEdit()
+            _hideExcluded = Not _hideExcluded
+            _hideExcludedButton.Text = If(_hideExcluded, "Show Excluded", "Hide Excluded")
+            RenderBomGrid()
+        End Sub
+
+        Private Sub BomGridCellEndEdit(sender As Object, e As DataGridViewCellEventArgs)
+            If e.RowIndex < 0 Then
+                Return
+            End If
+
+            Dim columnName = _bomGrid.Columns(e.ColumnIndex).Name
+            If columnName <> "Conditions" AndAlso columnName <> "Inheritance" Then
+                Return
+            End If
+
+            Dim nodeIdObj = _bomGrid.Rows(e.RowIndex).Tag
+            Dim row As BomGridRowItem = Nothing
+            If nodeIdObj Is Nothing OrElse Not _bomRowsByNodeId.TryGetValue(CInt(nodeIdObj), row) Then
+                Return
+            End If
+
+            Dim ruleText = Convert.ToString(_bomGrid.Rows(e.RowIndex).Cells(e.ColumnIndex).Value)
+            ruleText = If(ruleText, String.Empty).Replace(vbCr, " ").Replace(vbLf, " ").Replace(vbTab, " ").Trim()
+            If columnName = "Conditions" Then
+                row.Conditions = ruleText
+            Else
+                row.Inheritance = ruleText
+            End If
+        End Sub
+
+        Private Shared Function NormalizeModelKey(modelInput As String) As String
+            If String.IsNullOrWhiteSpace(modelInput) Then
+                Return String.Empty
+            End If
+
+            Try
+                Return ModelNameParser.Parse(modelInput).Name
+            Catch
+                Return modelInput.Trim()
+            End Try
+        End Function
 
         Private Async Sub SetSelectedParameterClickedAsync(sender As Object, e As EventArgs)
             Dim updates = CollectPendingParameterUpdates(_paramsGrid)
@@ -777,6 +998,7 @@ Namespace CreoRegenAppVB
 
                 ClearPendingParameterUpdates(_paramsGrid)
                 Await ReloadParametersGridAsync(_paramsGrid, modelInput)
+                _paramsModelInput = modelInput
                 _tabs.SelectedIndex = 1
                 AddLog("OK: " & result.Message)
             Catch ex As Exception
@@ -855,8 +1077,10 @@ Namespace CreoRegenAppVB
                         toggleText = If(_bomCollapsedNodeIds.Contains(row.NodeId), "+", "-")
                     End If
 
-                    Dim rowIndex = _bomGrid.Rows.Add(toggleText, CreateIndentedLevel(row.Level), row.FeatureId.ToString(), row.DisplayName, row.FileName, row.Descp, row.BsClass, "", "")
-                    _bomGrid.Rows(rowIndex).Tag = row.NodeId
+                    Dim rowIndex = _bomGrid.Rows.Add(toggleText, CreateIndentedLevel(row.Level), row.FeatureId.ToString(), row.DisplayName, row.FileName, row.Descp, row.BsClass, row.Conditions, row.Inheritance, row.ResolvedInheritance)
+                    Dim gridRow = _bomGrid.Rows(rowIndex)
+                    gridRow.Tag = row.NodeId
+                    ApplyBomRowStyle(gridRow, row)
                 Next
             Finally
                 _suppressSelectionChanged = False
@@ -865,9 +1089,47 @@ Namespace CreoRegenAppVB
             UpdateShowParametersButtonState()
         End Sub
 
+        Private Sub ApplyBomRowStyle(gridRow As DataGridViewRow, row As BomGridRowItem)
+            If row.IsExcluded Then
+                gridRow.DefaultCellStyle.Font = _strikeoutFont
+                gridRow.DefaultCellStyle.ForeColor = Color.Gray
+            End If
+
+            Dim conditionsCell = gridRow.Cells("Conditions")
+            Dim inheritanceCell = gridRow.Cells("Inheritance")
+            Dim resolvedCell = gridRow.Cells("Resolved")
+            If row.ParentNodeId = 0 Then
+                conditionsCell.ReadOnly = True
+                inheritanceCell.ReadOnly = True
+                conditionsCell.Style.BackColor = Color.Gainsboro
+                inheritanceCell.Style.BackColor = Color.Gainsboro
+                resolvedCell.Style.BackColor = Color.Gainsboro
+                conditionsCell.ToolTipText = "Top-level model uses the Parameters tab values."
+                Return
+            End If
+
+            If Not String.IsNullOrEmpty(row.ResolvedInheritance) Then
+                resolvedCell.ToolTipText = row.ResolvedInheritance
+            End If
+
+            ApplyRuleErrorStyle(conditionsCell, row.ConditionError)
+            ApplyRuleErrorStyle(inheritanceCell, row.InheritanceError)
+        End Sub
+
+        Private Shared Sub ApplyRuleErrorStyle(cell As DataGridViewCell, errorText As String)
+            If String.IsNullOrEmpty(errorText) Then
+                Return
+            End If
+
+            cell.Style.BackColor = Color.MistyRose
+            cell.Style.ForeColor = Color.DarkRed
+            cell.ToolTipText = errorText
+        End Sub
+
         Private Async Sub BomGridSelectionChanged(sender As Object, e As EventArgs)
             UpdateShowParametersButtonState()
             If _suppressSelectionChanged Then Return
+            If Not _itemParamsPanel.Visible Then Return
             Await LoadItemParametersForSelectedRowAsync(forceReload:=False)
         End Sub
 
@@ -1015,6 +1277,10 @@ Namespace CreoRegenAppVB
         End Sub
 
         Private Function IsRowVisible(row As BomGridRowItem) As Boolean
+            If _hideExcluded AndAlso row.IsExcluded Then
+                Return False
+            End If
+
             Dim parentId = row.ParentNodeId
             While parentId > 0
                 If _bomCollapsedNodeIds.Contains(parentId) Then
@@ -1058,13 +1324,16 @@ Namespace CreoRegenAppVB
 
                 Try
                     Using writer As New StreamWriter(validationResult.Item2, False, Encoding.UTF8)
-                        Dim headers As String() = {"Level", "Feature ID", "Name", "File Name", "Descp", "BS_Class", "Conditions", "Inheritance"}
+                        Dim headers As String() = {"Level", "Feature ID", "Name", "File Name", "Descp", "BS_Class", "Conditions", "Inheritance", "Resolved Values", "Included"}
                         writer.WriteLine(String.Join(",", EscapeCsvValues(headers)))
 
                         For Each row As DataGridViewRow In _bomGrid.Rows
                             If row.IsNewRow Then
                                 Continue For
                             End If
+
+                            Dim bomRow As BomGridRowItem = Nothing
+                            Dim isExcluded = row.Tag IsNot Nothing AndAlso _bomRowsByNodeId.TryGetValue(CInt(row.Tag), bomRow) AndAlso bomRow.IsExcluded
 
                             Dim values As String() = {
                                 Convert.ToString(row.Cells("Level").Value),
@@ -1074,7 +1343,9 @@ Namespace CreoRegenAppVB
                                 Convert.ToString(row.Cells("Descp").Value),
                                 Convert.ToString(row.Cells("BsClass").Value),
                                 Convert.ToString(row.Cells("Conditions").Value),
-                                Convert.ToString(row.Cells("Inheritance").Value)
+                                Convert.ToString(row.Cells("Inheritance").Value),
+                                Convert.ToString(row.Cells("Resolved").Value),
+                                If(isExcluded, "No", "Yes")
                             }
                             writer.WriteLine(String.Join(",", EscapeCsvValues(values)))
                         Next
@@ -1119,6 +1390,8 @@ Namespace CreoRegenAppVB
             _connectButton.Enabled = Not isBusy
             _retrieveButton.Enabled = Not isBusy
             _regenerateButton.Enabled = Not isBusy
+            _exportFormatComboBox.Enabled = Not isBusy
+            _exportModelButton.Enabled = Not isBusy
             _loadParametersButton.Enabled = Not isBusy
             _loadFeaturesButton.Enabled = Not isBusy
             _loadComponentsButton.Enabled = Not isBusy
@@ -1126,12 +1399,29 @@ Namespace CreoRegenAppVB
             _exportBomButton.Enabled = Not isBusy
             _expandAllBomButton.Enabled = Not isBusy
             _collapseAllBomButton.Enabled = Not isBusy
+            _applyConfigButton.Enabled = Not isBusy
+            _saveRulesButton.Enabled = Not isBusy
+            _hideExcludedButton.Enabled = Not isBusy
             _showItemParametersButton.Enabled = Not isBusy AndAlso _tabs.SelectedIndex = BomTabIndex AndAlso _bomGrid.SelectedRows.Count > 0
             _setParameterButton.Enabled = Not isBusy
             _clearLogButton.Enabled = Not isBusy
             _activateButton.Enabled = Not isBusy
             _itemSetParameterButton.Enabled = Not isBusy
             _itemParamsGrid.Enabled = Not isBusy
+
+            If Not isBusy Then
+                ResetGridCursors()
+            End If
+        End Sub
+
+        ' DataGridView caches Cursor (WaitCursor while busy) on column-border hover and restores it later.
+        Private Sub ResetGridCursors()
+            For Each grid In New DataGridView() {_paramsGrid, _featuresGrid, _componentsGrid, _bomGrid, _itemParamsGrid}
+                grid.Cursor = Cursors.Default
+                If grid.EditingControl IsNot Nothing Then
+                    grid.EditingControl.UseWaitCursor = False
+                End If
+            Next
         End Sub
 
         Private Shared Function BuildWindowTitle(status As LicenseStatus) As String

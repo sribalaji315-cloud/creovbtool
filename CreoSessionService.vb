@@ -4,10 +4,26 @@ Imports System.Collections.Generic
 Imports System.Diagnostics
 Imports System.Globalization
 Imports System.IO
+Imports System.Runtime.InteropServices
 Imports System.Threading
 Imports System.Threading.Tasks
+Imports ComTypes = System.Runtime.InteropServices.ComTypes
 
 Namespace CreoRegenAppVB
+    Friend Enum ModelExportFormat
+        Pdf
+        Dxf
+        [Step]
+        Iges
+    End Enum
+
+    ' Only the IDispatch slots needed to reach the pfcls type library.
+    <ComImport(), Guid("00020400-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)>
+    Friend Interface IDispatchTypeInfo
+        <PreserveSig()> Function GetTypeInfoCount(ByRef count As Integer) As Integer
+        <PreserveSig()> Function GetTypeInfo(typeInfoIndex As Integer, lcid As Integer, <MarshalAs(UnmanagedType.Interface)> ByRef typeInfo As ComTypes.ITypeInfo) As Integer
+    End Interface
+
     Friend Class OperationResult
         Friend Property Success As Boolean
         Friend Property Message As String
@@ -111,6 +127,19 @@ Namespace CreoRegenAppVB
         Public Property ModelTypeName As String
         Public Property Descp As String
         Public Property BsClass As String
+        Public Property FeaturePath As String
+        Public Property Conditions As String
+        Public Property Inheritance As String
+        Public Property IsExcluded As Boolean
+        Public Property ConditionError As String
+        Public Property InheritanceError As String
+        Public Property ResolvedInheritance As String
+    End Class
+
+    Friend Class ComponentVisibilityItem
+        Friend Property FeaturePath As String
+        Friend Property Hide As Boolean
+        Friend Property Label As String
     End Class
 
     Friend Class BomQueryResult
@@ -144,6 +173,7 @@ Namespace CreoRegenAppVB
         Private Const MaxBomDepth As Integer = 32
         Private Const MaxBomNodes As Integer = 10000
         Private Const UserFacingTechnicalErrorMessage As String = "The operation failed."
+        Private Const ExcludedLayerName As String = "BOMFORGE_EXCLUDED"
 
         Private Shared ReadOnly _extensionKindMap As Dictionary(Of String, CreoModelKind) =
             New Dictionary(Of String, CreoModelKind)(StringComparer.OrdinalIgnoreCase) From {
@@ -178,7 +208,16 @@ Namespace CreoRegenAppVB
             "pfc.MpfcModelItem",
             "pfcls.pfcModelItem",
             "pfcls.CpfcModelItem",
-            "pfc.pfcModelItem"
+            "pfc.pfcModelItem",
+            "pfcls.pfcPDFExportInstructions",
+            "pfcls.CCpfcPDFExportInstructions",
+            "pfcls.CpfcPDFExportInstructions",
+            "pfcls.pfcDXFExportInstructions",
+            "pfcls.CCpfcDXFExportInstructions",
+            "pfcls.CpfcDXFExportInstructions",
+            "pfcls.pfcExport2DOption",
+            "pfcls.CCpfcExport2DOption",
+            "pfcls.CpfcExport2DOption"
         }
 
         Private ReadOnly _queue As BlockingCollection(Of Action)
@@ -187,6 +226,7 @@ Namespace CreoRegenAppVB
         Private _disposed As Boolean
         Private _asyncConnection As Object
         Private _session As Object
+        Private _pfcEnumValues As Dictionary(Of String, Integer)
 
         Friend Sub New()
             _queue = New BlockingCollection(Of Action)()
@@ -623,11 +663,503 @@ Namespace CreoRegenAppVB
                                   Dim rootNode = BuildBomNode(model, ResolveModelDisplayName(model, rootFileName), rootFileName, -1, 0, totalNodeCount, visitedModels)
                                   Dim rows = New List(Of BomGridRowItem)()
                                   Dim nextNodeId As Integer = 1
-                                  FlattenBomNode(rootNode, rows, 0, nextNodeId)
+                                  FlattenBomNode(rootNode, rows, 0, String.Empty, nextNodeId)
                                   Dim nodeCount = CountBomNodes(rootNode) - 1
                                   Return BomQueryResult.Ok(rootNode, rows, "Built BOM hierarchy with " & nodeCount.ToString(CultureInfo.InvariantCulture) & " component node(s) from " & rootFileName)
                               End Function)
         End Function
+
+        Friend Function ApplyComponentVisibilityAsync(modelInput As String, items As IEnumerable(Of ComponentVisibilityItem)) As Task(Of OperationResult)
+            Dim itemList As New List(Of ComponentVisibilityItem)()
+            If items IsNot Nothing Then
+                itemList.AddRange(items)
+            End If
+
+            Return Enqueue(Function()
+                               If _session Is Nothing Then
+                                   Return OperationResult.Fail("No active Creo session. Click Connect first.")
+                               End If
+
+                               Dim parsed = ModelNameParser.Parse(modelInput)
+                               Dim resolved As ParsedModelName = Nothing
+                               Dim model = TryRetrieveModel(parsed, resolved)
+                               If model Is Nothing Then
+                                   Return OperationResult.Fail("Model not found after trying supported extensions: " & parsed.Name)
+                               End If
+
+                               Dim layerItemType As Integer
+                               Dim blankStatus As Integer
+                               If Not ResolvePfcEnumValue("EpfcITEM_LAYER", layerItemType) OrElse Not ResolvePfcEnumValue("EpfcLAYER_BLANK", blankStatus) Then
+                                   Return OperationResult.Fail("Creo layer enums (EpfcITEM_LAYER / EpfcLAYER_BLANK) are not available.")
+                               End If
+
+                               Dim ownersByKey As New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase)
+                               Dim toHide As New List(Of Tuple(Of ComponentVisibilityItem, Object, Object))()
+                               Dim hiddenCount As Integer = 0
+                               Dim shownCount As Integer = 0
+                               Dim failures As New List(Of String)()
+                               ownersByKey(TryGetString(model, "FileName", "GetFileName")) = model
+
+                               For Each item In itemList
+                                   Try
+                                       Dim ownerModel As Object = Nothing
+                                       Dim feature = FindComponentFeatureByPath(model, item.FeaturePath, ownerModel)
+                                       If feature Is Nothing Then
+                                           failures.Add(item.Label & ": component not found in Creo.")
+                                           Continue For
+                                       End If
+
+                                       ownersByKey(TryGetString(ownerModel, "FileName", "GetFileName")) = ownerModel
+                                       If item.Hide Then
+                                           toHide.Add(Tuple.Create(item, ownerModel, feature))
+                                       End If
+                                   Catch ex As Exception
+                                       LogApplicationError("Component lookup " & item.Label, ex)
+                                       failures.Add(item.Label & ": " & DescribeComError(ex))
+                                   End Try
+                               Next
+
+                               ' Unhide everything the app hid previously, then re-apply the current rules.
+                               For Each owner In ownersByKey
+                                   Try
+                                       Dim layer = GetExcludedLayer(owner.Value, layerItemType, False)
+                                       If layer IsNot Nothing Then
+                                           shownCount += ClearLayer(layer)
+                                       End If
+                                   Catch ex As Exception
+                                       LogApplicationError("Unhide components in " & owner.Key, ex)
+                                       failures.Add(owner.Key & ": unhide failed: " & DescribeComError(ex))
+                                   End Try
+                               Next
+
+                               For Each entry In toHide
+                                   Try
+                                       Dim layer = GetExcludedLayer(entry.Item2, layerItemType, True)
+                                       InvokeMethod(layer, "AddItem", entry.Item3)
+                                       SetProperty(layer, "Status", blankStatus)
+                                       hiddenCount += 1
+                                   Catch ex As Exception
+                                       LogApplicationError("Component hide " & entry.Item1.Label, ex)
+                                       failures.Add(entry.Item1.Label & ": " & DescribeComError(ex))
+                                   End Try
+                               Next
+
+                               If hiddenCount + shownCount > 0 Then
+                                   Try
+                                       ActivateModelWindow(model)
+                                   Catch
+                                       ' Layer changes are applied; repaint is best-effort.
+                                   End Try
+                               End If
+
+                               Dim summary = "Creo: unhid " & shownCount.ToString(CultureInfo.InvariantCulture) & " component(s), then hid " &
+                                             hiddenCount.ToString(CultureInfo.InvariantCulture) & " (layer " & ExcludedLayerName & ")."
+                               If failures.Count > 0 Then
+                                   Return OperationResult.Fail(summary & " Failed: " & String.Join(" | ", failures.ToArray()))
+                               End If
+
+                               Return OperationResult.Ok(summary)
+                           End Function)
+        End Function
+
+        Private Function GetExcludedLayer(ownerModel As Object, layerItemType As Integer, createIfMissing As Boolean) As Object
+            Dim layer = InvokeMethodSafe(ownerModel, "GetItemByName", layerItemType, ExcludedLayerName)
+            If layer IsNot Nothing OrElse Not createIfMissing Then
+                Return layer
+            End If
+
+            Return InvokeMethod(ownerModel, "CreateLayer", ExcludedLayerName)
+        End Function
+
+        Private Function ClearLayer(layer As Object) As Integer
+            Dim itemsObj = InvokeMethodSafe(layer, "ListItems")
+            If itemsObj Is Nothing Then
+                Return 0
+            End If
+
+            Dim countMsg As String = ""
+            Dim count = GetCollectionCount(itemsObj, countMsg)
+            Dim removed As Integer = 0
+            For i As Integer = 0 To count - 1
+                Dim layerItem = GetCollectionItem(itemsObj, i)
+                If layerItem IsNot Nothing Then
+                    InvokeMethod(layer, "RemoveItem", layerItem)
+                    removed += 1
+                End If
+            Next
+
+            Return removed
+        End Function
+
+        ' FeaturePath is a "/"-separated chain of component feature ids from the top assembly.
+        Private Function FindComponentFeatureByPath(topModel As Object, featurePath As String, ByRef ownerModel As Object) As Object
+            ownerModel = Nothing
+            If String.IsNullOrWhiteSpace(featurePath) Then
+                Return Nothing
+            End If
+
+            Dim segments = featurePath.Split("/"c)
+            Dim current = topModel
+            For i As Integer = 0 To segments.Length - 1
+                Dim featureId As Integer
+                If Not Integer.TryParse(segments(i), NumberStyles.Integer, CultureInfo.InvariantCulture, featureId) Then
+                    Return Nothing
+                End If
+
+                Dim feature = FindFeatureById(current, featureId)
+                If feature Is Nothing Then
+                    Return Nothing
+                End If
+
+                If i = segments.Length - 1 Then
+                    ownerModel = current
+                    Return feature
+                End If
+
+                current = RetrieveModelFromDescriptor(GetFeatureModelDescriptor(feature))
+                If current Is Nothing Then
+                    Return Nothing
+                End If
+            Next
+
+            Return Nothing
+        End Function
+
+        Private Function FindFeatureById(model As Object, featureId As Integer) As Object
+            Dim feature = InvokeMethodSafe(model, "GetFeatureById", featureId)
+            If feature IsNot Nothing Then
+                Return feature
+            End If
+
+            Dim featuresObj = GetFeaturesCollection(model)
+            If featuresObj Is Nothing Then
+                Return Nothing
+            End If
+
+            Dim countMsg As String = ""
+            Dim count = GetCollectionCount(featuresObj, countMsg)
+            For i As Integer = 0 To count - 1
+                Dim candidate = GetCollectionItem(featuresObj, i)
+                If candidate IsNot Nothing AndAlso GetFeatureId(candidate) = featureId Then
+                    Return candidate
+                End If
+            Next
+
+            Return Nothing
+        End Function
+
+        Private Shared Function DescribeComError(ex As Exception) As String
+            Dim current = ex
+            While TypeOf current Is System.Reflection.TargetInvocationException AndAlso current.InnerException IsNot Nothing
+                current = current.InnerException
+            End While
+
+            If current Is Nothing Then
+                Return "Unknown error."
+            End If
+
+            Dim comEx = TryCast(current, COMException)
+            If comEx IsNot Nothing Then
+                Return comEx.Message & " (HRESULT 0x" & comEx.ErrorCode.ToString("X8", CultureInfo.InvariantCulture) & ")"
+            End If
+
+            Return current.Message
+        End Function
+
+        Friend Function GetWorkingDirectoryAsync() As Task(Of OperationResult)
+            Return Enqueue(Function()
+                               If _session Is Nothing Then
+                                   Return OperationResult.Fail("No active Creo session. Click Connect first.")
+                               End If
+
+                               Dim dirText = TryGetString(_session, "CurrentDirectory", "GetCurrentDirectory")
+                               If String.IsNullOrWhiteSpace(dirText) Then
+                                   Return OperationResult.Fail("Unable to read the Creo working directory.")
+                               End If
+
+                               Return OperationResult.Ok(dirText.Trim())
+                           End Function)
+        End Function
+
+        Friend Function ExportModelAsync(modelInput As String, format As ModelExportFormat) As Task(Of OperationResult)
+            Return Enqueue(Function()
+                               If _session Is Nothing Then
+                                   Return OperationResult.Fail("No active Creo session. Click Connect first.")
+                               End If
+
+                               Dim formatName = format.ToString().ToUpperInvariant()
+                               Dim parsed = ModelNameParser.Parse(modelInput)
+                               Dim resolved As ParsedModelName = Nothing
+                               Dim model = TryRetrieveModel(parsed, resolved)
+                               If model Is Nothing Then
+                                   Return OperationResult.Fail("Model not found after trying supported extensions: " & parsed.Name)
+                               End If
+
+                               Dim modelFileName = TryGetString(model, "FileName", "GetFileName")
+                               If String.IsNullOrWhiteSpace(modelFileName) Then
+                                   modelFileName = resolved.FileName
+                               End If
+
+                               Dim baseName = modelFileName.Trim().Split("."c)(0)
+                               ValidateModelIdentifier(baseName, "model name")
+
+                               Dim modelType = GetExportModelType(model, resolved)
+                               Dim requiresDrawing = format = ModelExportFormat.Pdf OrElse format = ModelExportFormat.Dxf
+                               If requiresDrawing AndAlso (modelType = 0 OrElse modelType = 1) Then
+                                   Dim drawing = RetrieveDrawingByName(baseName)
+                                   If drawing Is Nothing Then
+                                       Return OperationResult.Fail(formatName & " export requires a drawing; " & baseName.ToLowerInvariant() & ".drw was not found.")
+                                   End If
+                                   model = drawing
+                                   modelFileName = TryGetString(drawing, "FileName", "GetFileName")
+                                   If String.IsNullOrWhiteSpace(modelFileName) Then
+                                       modelFileName = baseName.ToLowerInvariant() & ".drw"
+                                   End If
+                                   modelType = 2
+                               End If
+                               If requiresDrawing AndAlso modelType <> 2 Then
+                                   Return OperationResult.Fail(formatName & " export requires a drawing (.drw): " & modelFileName)
+                               End If
+                               If Not requiresDrawing AndAlso modelType <> 0 AndAlso modelType <> 1 Then
+                                   Return OperationResult.Fail(formatName & " export requires a part or assembly: " & modelFileName)
+                               End If
+
+                               Dim exportFileName = baseName.ToLowerInvariant() & GetExportExtension(format)
+
+                               Dim workingDirectory = TryGetString(_session, "CurrentDirectory", "GetCurrentDirectory").Trim()
+                               Dim outputPath = If(workingDirectory.Length > 0, Path.Combine(workingDirectory, exportFileName), String.Empty)
+                               Dim previousWriteUtc = If(outputPath.Length > 0 AndAlso File.Exists(outputPath), File.GetLastWriteTimeUtc(outputPath), DateTime.MinValue)
+
+                               Dim note = String.Empty
+                               Try
+                                   Select Case format
+                                       Case ModelExportFormat.Pdf
+                                           Dim pdfInstructions = InvokeMethod(CreatePfcObject("pfcPDFExportInstructions"), "Create")
+                                           Try
+                                               SetProperty(pdfInstructions, "FilePath", exportFileName)
+                                           Catch
+                                           End Try
+                                           ActivateModelWindow(model)
+                                           InvokeMethod(model, "Export", exportFileName, pdfInstructions)
+
+                                       Case ModelExportFormat.Dxf
+                                           Dim dxfInstructions = InvokeMethod(CreatePfcObject("pfcDXFExportInstructions"), "Create")
+                                           If Not TrySetAllSheetsOption(dxfInstructions) Then
+                                               note = " (all-sheets option unavailable; current sheet only)"
+                                           End If
+                                           ActivateModelWindow(model)
+                                           InvokeMethod(model, "Export", exportFileName, dxfInstructions)
+
+                                       Case ModelExportFormat.Step
+                                           Dim stepFailure = ExportIntf3D(model, exportFileName, outputPath, previousWriteUtc, "EpfcEXPORT_STEP")
+                                           If stepFailure IsNot Nothing Then
+                                               Return OperationResult.Fail(stepFailure)
+                                           End If
+
+                                       Case ModelExportFormat.Iges
+                                           Dim igesFailure = ExportIntf3D(model, exportFileName, outputPath, previousWriteUtc, "EpfcEXPORT_IGES_3D", "EpfcEXPORT_IGES")
+                                           If igesFailure IsNot Nothing Then
+                                               Return OperationResult.Fail(igesFailure)
+                                           End If
+                                   End Select
+                               Catch ex As Exception
+                                   LogApplicationError(formatName & " export", ex)
+                                   Return OperationResult.Fail(formatName & " export failed: " & ex.Message)
+                               End Try
+
+                               If outputPath.Length = 0 Then
+                                   Return OperationResult.Ok("Exported " & exportFileName & " to the Creo working directory" & note & ".")
+                               End If
+
+                               If Not IsFreshExport(outputPath, previousWriteUtc) Then
+                                   Return OperationResult.Fail(formatName & " export reported no error, but " & outputPath & " was not written.")
+                               End If
+
+                               Return OperationResult.Ok("Exported " & modelFileName & " to " & outputPath & note)
+                           End Function)
+        End Function
+
+        Private Function RetrieveDrawingByName(baseName As String) As Object
+            Dim drawingName As New ParsedModelName With {
+                .Name = baseName,
+                .Ext = "DRW",
+                .Kind = CreoModelKind.Drawing,
+                .FileName = baseName.ToLowerInvariant() & ".drw",
+                .HasExplicitExtension = True
+            }
+
+            Try
+                Dim drawing = InvokeMethod(_session, "RetrieveModel", CreateModelDescriptor(drawingName))
+                If drawing IsNot Nothing AndAlso GetExportModelType(drawing, drawingName) = 2 Then
+                    Return drawing
+                End If
+            Catch
+            End Try
+
+            Return Nothing
+        End Function
+
+        Private Function GetExportModelType(model As Object, resolved As ParsedModelName) As Integer
+            Dim typeValue = GetProperty(model, "Type")
+            If typeValue IsNot Nothing Then
+                Try
+                    Return CInt(typeValue)
+                Catch
+                End Try
+            End If
+
+            If resolved Is Nothing OrElse resolved.Kind = CreoModelKind.Unknown Then
+                Return -1
+            End If
+
+            Return GetModelTypeValue(resolved.Kind)
+        End Function
+
+        Private Shared Function GetExportExtension(format As ModelExportFormat) As String
+            Select Case format
+                Case ModelExportFormat.Pdf
+                    Return ".pdf"
+                Case ModelExportFormat.Dxf
+                    Return ".dxf"
+                Case ModelExportFormat.Step
+                    Return ".stp"
+                Case Else
+                    Return ".igs"
+            End Select
+        End Function
+
+        Private Shared Function IsFreshExport(outputPath As String, previousWriteUtc As DateTime) As Boolean
+            Return File.Exists(outputPath) AndAlso File.GetLastWriteTimeUtc(outputPath) > previousWriteUtc
+        End Function
+
+        Private Function TrySetAllSheetsOption(instructions As Object) As Boolean
+            Dim allSheets As Integer
+            If Not ResolvePfcEnumValue("EpfcEXPORT_ALL", allSheets) Then
+                Return False
+            End If
+
+            Try
+                Dim sheetOption = InvokeMethod(CreatePfcObject("pfcExport2DOption"), "Create")
+                SetProperty(sheetOption, "ExportSheetOption", allSheets)
+                SetProperty(instructions, "Option", sheetOption)
+                Return True
+            Catch ex As Exception
+                LogApplicationError("DXF all-sheets option", ex)
+                Return False
+            End Try
+        End Function
+
+        ' Returns Nothing on success, otherwise a user-facing failure message.
+        Private Function ExportIntf3D(model As Object, exportFileName As String, outputPath As String, previousWriteUtc As DateTime, ParamArray exportTypeNames As String()) As String
+            Dim lastError As String = Nothing
+            For Each exportTypeName As String In exportTypeNames
+                Dim exportType As Integer
+                If Not ResolvePfcEnumValue(exportTypeName, exportType) Then
+                    Continue For
+                End If
+
+                ' ExportIntf3D(FileName, Type, Profile): Profile is "optional" but must still be passed as null.
+                For Each profile As Object In New Object() {DBNull.Value, Nothing}
+                    Try
+                        model.GetType().InvokeMember(
+                            "ExportIntf3D",
+                            BindingFlags.InvokeMethod,
+                            Nothing,
+                            model,
+                            New Object() {exportFileName, exportType, profile})
+                        If outputPath.Length = 0 OrElse IsFreshExport(outputPath, previousWriteUtc) Then
+                            Return Nothing
+                        End If
+                        lastError = "Creo reported no error, but " & outputPath & " was not written."
+                        Exit For
+                    Catch ex As Exception
+                        Dim inner = If(TypeOf ex Is TargetInvocationException AndAlso ex.InnerException IsNot Nothing, ex.InnerException, ex)
+                        LogApplicationError("ExportIntf3D " & exportTypeName, inner)
+                        lastError = "Export failed: " & inner.Message
+                    End Try
+                Next
+            Next
+
+            If lastError Is Nothing Then
+                Return "Export type " & String.Join("/", exportTypeNames) & " is not available in this Creo version."
+            End If
+
+            Return lastError
+        End Function
+
+        Private Function ResolvePfcEnumValue(memberName As String, ByRef value As Integer) As Boolean
+            If _pfcEnumValues Is Nothing Then
+                Dim loaded = LoadPfcEnumValues()
+                If loaded.Count = 0 Then
+                    Return False
+                End If
+                _pfcEnumValues = loaded
+            End If
+
+            Return _pfcEnumValues.TryGetValue(memberName, value)
+        End Function
+
+        ' Late binding has no interop assembly, so enum constants are read from the pfcls type library.
+        Private Function LoadPfcEnumValues() As Dictionary(Of String, Integer)
+            Dim values As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
+            Try
+                Dim dispatch = TryCast(_session, IDispatchTypeInfo)
+                If dispatch Is Nothing Then
+                    Return values
+                End If
+
+                Dim sessionTypeInfo As ComTypes.ITypeInfo = Nothing
+                If dispatch.GetTypeInfo(0, 0, sessionTypeInfo) <> 0 OrElse sessionTypeInfo Is Nothing Then
+                    Return values
+                End If
+
+                Dim typeLib As ComTypes.ITypeLib = Nothing
+                Dim typeLibIndex As Integer
+                sessionTypeInfo.GetContainingTypeLib(typeLib, typeLibIndex)
+
+                For i As Integer = 0 To typeLib.GetTypeInfoCount() - 1
+                    Dim kind As ComTypes.TYPEKIND
+                    typeLib.GetTypeInfoType(i, kind)
+                    If kind = ComTypes.TYPEKIND.TKIND_ENUM Then
+                        Dim enumInfo As ComTypes.ITypeInfo = Nothing
+                        typeLib.GetTypeInfo(i, enumInfo)
+                        ReadEnumConstants(enumInfo, values)
+                    End If
+                Next
+            Catch ex As Exception
+                LogApplicationError("Load pfcls enum values", ex)
+            End Try
+
+            Return values
+        End Function
+
+        Private Shared Sub ReadEnumConstants(enumInfo As ComTypes.ITypeInfo, values As Dictionary(Of String, Integer))
+            Dim attrPtr As IntPtr = IntPtr.Zero
+            enumInfo.GetTypeAttr(attrPtr)
+            Try
+                Dim attr = CType(Marshal.PtrToStructure(attrPtr, GetType(ComTypes.TYPEATTR)), ComTypes.TYPEATTR)
+                For j As Integer = 0 To attr.cVars - 1
+                    Dim varPtr As IntPtr = IntPtr.Zero
+                    enumInfo.GetVarDesc(j, varPtr)
+                    Try
+                        Dim varDesc = CType(Marshal.PtrToStructure(varPtr, GetType(ComTypes.VARDESC)), ComTypes.VARDESC)
+                        If varDesc.varkind = ComTypes.VARKIND.VAR_CONST Then
+                            Dim names(0) As String
+                            Dim nameCount As Integer
+                            enumInfo.GetNames(varDesc.memid, names, 1, nameCount)
+                            If nameCount > 0 AndAlso Not values.ContainsKey(names(0)) Then
+                                Dim constant = Marshal.GetObjectForNativeVariant(varDesc.desc.lpvarValue)
+                                values(names(0)) = Convert.ToInt32(constant, CultureInfo.InvariantCulture)
+                            End If
+                        End If
+                    Finally
+                        enumInfo.ReleaseVarDesc(varPtr)
+                    End Try
+                Next
+            Finally
+                enumInfo.ReleaseTypeAttr(attrPtr)
+            End Try
+        End Sub
 
         Private Function TryRetrieveModel(parsed As ParsedModelName, ByRef resolved As ParsedModelName) As Object
             resolved = Nothing
@@ -995,6 +1527,12 @@ Namespace CreoRegenAppVB
                     Return New String() {"pfcls.CMpfcModelItem", "pfcls.MpfcModelItem", "pfc.MpfcModelItem"}
                 Case "pfcModelItem"
                     Return New String() {"pfcls.pfcModelItem", "pfcls.CpfcModelItem", "pfc.pfcModelItem"}
+                Case "pfcPDFExportInstructions"
+                    Return New String() {"pfcls.pfcPDFExportInstructions", "pfcls.CCpfcPDFExportInstructions", "pfcls.CpfcPDFExportInstructions"}
+                Case "pfcDXFExportInstructions"
+                    Return New String() {"pfcls.pfcDXFExportInstructions", "pfcls.CCpfcDXFExportInstructions", "pfcls.CpfcDXFExportInstructions"}
+                Case "pfcExport2DOption"
+                    Return New String() {"pfcls.pfcExport2DOption", "pfcls.CCpfcExport2DOption", "pfcls.CpfcExport2DOption"}
                 Case Else
                     Return New String() {}
             End Select
@@ -1294,13 +1832,22 @@ Namespace CreoRegenAppVB
             Return node
         End Function
 
-        Private Sub FlattenBomNode(node As BomNodeItem, rows As List(Of BomGridRowItem), parentNodeId As Integer, ByRef nextNodeId As Integer)
+        Private Sub FlattenBomNode(node As BomNodeItem, rows As List(Of BomGridRowItem), parentNodeId As Integer, parentPath As String, ByRef nextNodeId As Integer)
             If node Is Nothing OrElse rows Is Nothing Then
                 Return
             End If
 
             Dim currentNodeId = nextNodeId
             nextNodeId += 1
+
+            Dim featurePath As String
+            If parentNodeId = 0 Then
+                featurePath = String.Empty
+            ElseIf String.IsNullOrEmpty(parentPath) Then
+                featurePath = node.FeatureId.ToString(CultureInfo.InvariantCulture)
+            Else
+                featurePath = parentPath & "/" & node.FeatureId.ToString(CultureInfo.InvariantCulture)
+            End If
 
             rows.Add(New BomGridRowItem With {
                 .NodeId = currentNodeId,
@@ -1312,7 +1859,8 @@ Namespace CreoRegenAppVB
                 .FileName = node.FileName,
                 .ModelTypeName = node.ModelTypeName,
                 .Descp = node.Descp,
-                .BsClass = node.BsClass
+                .BsClass = node.BsClass,
+                .FeaturePath = featurePath
             })
 
             If node.Children Is Nothing Then
@@ -1320,7 +1868,7 @@ Namespace CreoRegenAppVB
             End If
 
             For Each child In node.Children
-                FlattenBomNode(child, rows, currentNodeId, nextNodeId)
+                FlattenBomNode(child, rows, currentNodeId, featurePath, nextNodeId)
             Next
         End Sub
 
