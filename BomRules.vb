@@ -563,6 +563,7 @@ Namespace CreoRegenAppVB
                 row.ConditionError = Nothing
                 row.InheritanceError = Nothing
                 row.ResolvedInheritance = Nothing
+                row.ResolvedAssignments = Nothing
 
                 If row.ParentNodeId = 0 Then
                     scopes(row.NodeId) = rootScope
@@ -597,12 +598,15 @@ Namespace CreoRegenAppVB
                 If Not String.IsNullOrWhiteSpace(row.Inheritance) Then
                     Try
                         Dim resolvedParts As New List(Of String)()
+                        Dim resolvedPairs As New List(Of KeyValuePair(Of String, String))()
                         For Each assignment In RuleParser.ParseInheritance(row.Inheritance)
                             Dim resolvedValue = assignment.Expression.Evaluate(parentScope).ToParameterText()
                             childScope(assignment.Target) = resolvedValue
                             resolvedParts.Add(assignment.Target & "=" & resolvedValue)
+                            resolvedPairs.Add(New KeyValuePair(Of String, String)(assignment.Target, resolvedValue))
                         Next
                         row.ResolvedInheritance = String.Join("; ", resolvedParts)
+                        row.ResolvedAssignments = resolvedPairs
                     Catch ex As BomRuleException
                         row.InheritanceError = ex.Message
                         childScope.Clear()

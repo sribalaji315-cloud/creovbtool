@@ -134,12 +134,19 @@ Namespace CreoRegenAppVB
         Public Property ConditionError As String
         Public Property InheritanceError As String
         Public Property ResolvedInheritance As String
+        Public Property ResolvedAssignments As List(Of KeyValuePair(Of String, String))
     End Class
 
     Friend Class ComponentVisibilityItem
         Friend Property FeaturePath As String
         Friend Property Hide As Boolean
         Friend Property Label As String
+    End Class
+
+    Friend Class InheritedParameterItem
+        Friend Property FeaturePath As String
+        Friend Property Label As String
+        Friend Property Assignments As List(Of KeyValuePair(Of String, String))
     End Class
 
     Friend Class BomQueryResult
@@ -483,18 +490,10 @@ Namespace CreoRegenAppVB
                                        Return OperationResult.Fail("Parameter not found: " & update.Name)
                                    End If
 
-                                   Dim currentValue = GetProperty(param, "Value")
-                                   Dim discr = GetParamDiscr(currentValue)
-                                   Dim newValue = CreateParamValueFromInput(discr, update.UserInput)
-                                   If newValue Is Nothing Then
-                                       Return OperationResult.Fail("Set failed: Could not create parameter value object for discr=" & discr.ToString(CultureInfo.InvariantCulture) & ". Input: " & update.UserInput)
+                                   Dim errorText = ApplyParameterValue(param, update.Name, update.UserInput)
+                                   If errorText IsNot Nothing Then
+                                       Return OperationResult.Fail(errorText)
                                    End If
-
-                                   Try
-                                       SetProperty(param, "Value", newValue)
-                                   Catch ex As Exception
-                                       Return OperationResult.Fail("Error assigning new value to parameter '" & update.Name & "': " & ex.Message)
-                                   End Try
                                Next
 
                                Dim modelType As Integer = -1
@@ -510,6 +509,151 @@ Namespace CreoRegenAppVB
                                End Try
 
                                Return OperationResult.Ok("Updated " & updateList.Count.ToString(CultureInfo.InvariantCulture) & " parameter(s) and regenerated model.")
+                           End Function)
+        End Function
+
+        ' Returns Nothing on success, otherwise a user-facing failure message.
+        Private Function ApplyParameterValue(param As Object, parameterName As String, userInput As String) As String
+            Dim currentValue = GetProperty(param, "Value")
+            Dim discr = GetParamDiscr(currentValue)
+            Dim newValue = CreateParamValueFromInput(discr, userInput)
+            If newValue Is Nothing Then
+                Return "Set failed: Could not create parameter value object for discr=" & discr.ToString(CultureInfo.InvariantCulture) & ". Input: " & userInput
+            End If
+
+            Try
+                SetProperty(param, "Value", newValue)
+            Catch ex As Exception
+                Return "Error assigning new value to parameter '" & parameterName & "': " & ex.Message
+            End Try
+
+            Return Nothing
+        End Function
+
+        Private Function IsRelationDrivenParameter(param As Object) As Boolean
+            Dim driven = GetProperty(param, "IsRelationDriven")
+            If driven Is Nothing Then
+                Return False
+            End If
+
+            Try
+                Return CBool(driven)
+            Catch
+                Return False
+            End Try
+        End Function
+
+        Friend Function PushInheritedParametersAsync(modelInput As String, items As IEnumerable(Of InheritedParameterItem)) As Task(Of OperationResult)
+            Dim itemList As New List(Of InheritedParameterItem)()
+            If items IsNot Nothing Then
+                itemList.AddRange(items)
+            End If
+
+            Return Enqueue(Function()
+                               If _session Is Nothing Then
+                                   Return OperationResult.Fail("No active Creo session. Click Connect first.")
+                               End If
+
+                               If itemList.Count = 0 Then
+                                   Return OperationResult.Fail("No inherited parameter values to push.")
+                               End If
+
+                               Dim parsed = ModelNameParser.Parse(modelInput)
+                               Dim resolved As ParsedModelName = Nothing
+                               Dim topModel = TryRetrieveModel(parsed, resolved)
+                               If topModel Is Nothing Then
+                                   Return OperationResult.Fail("Model not found after trying supported extensions: " & parsed.Name)
+                               End If
+
+                               Const MaxListedProblems As Integer = 20
+                               Dim setCount As Integer = 0
+                               Dim missingCount As Integer = 0
+                               Dim drivenCount As Integer = 0
+                               Dim failedCount As Integer = 0
+                               Dim problems As New List(Of String)()
+
+                               For Each item In itemList
+                                   If item Is Nothing OrElse item.Assignments Is Nothing OrElse item.Assignments.Count = 0 Then
+                                       Continue For
+                                   End If
+
+                                   Dim componentModel As Object = Nothing
+                                   Try
+                                       Dim ownerModel As Object = Nothing
+                                       Dim feature = FindComponentFeatureByPath(topModel, item.FeaturePath, ownerModel)
+                                       If feature IsNot Nothing Then
+                                           componentModel = RetrieveModelFromDescriptor(GetFeatureModelDescriptor(feature))
+                                       End If
+                                   Catch ex As Exception
+                                       LogApplicationError("Push inheritance lookup " & item.Label, ex)
+                                   End Try
+
+                                   If componentModel Is Nothing Then
+                                       failedCount += item.Assignments.Count
+                                       problems.Add(item.Label & ": component not found in Creo.")
+                                       Continue For
+                                   End If
+
+                                   For Each assignment In item.Assignments
+                                       Try
+                                           Dim param = FindParameterByName(componentModel, assignment.Key)
+                                           If param Is Nothing Then
+                                               missingCount += 1
+                                               problems.Add(item.Label & ": parameter " & assignment.Key & " not found.")
+                                               Continue For
+                                           End If
+
+                                           If IsRelationDrivenParameter(param) Then
+                                               drivenCount += 1
+                                               problems.Add(item.Label & ": " & assignment.Key & " is driven by a relation.")
+                                               Continue For
+                                           End If
+
+                                           Dim errorText = ApplyParameterValue(param, assignment.Key, assignment.Value)
+                                           If errorText Is Nothing Then
+                                               setCount += 1
+                                           Else
+                                               failedCount += 1
+                                               problems.Add(item.Label & ": " & errorText)
+                                           End If
+                                       Catch ex As Exception
+                                           LogApplicationError("Push inheritance " & item.Label & " " & assignment.Key, ex)
+                                           failedCount += 1
+                                           problems.Add(item.Label & ": " & assignment.Key & ": " & DescribeComError(ex))
+                                       End Try
+                                   Next
+                               Next
+
+                               If setCount > 0 Then
+                                   Dim modelType As Integer = -1
+                                   Try
+                                       modelType = CInt(GetProperty(topModel, "Type"))
+                                   Catch
+                                   End Try
+
+                                   Try
+                                       InvokeNativeRegeneration(topModel, modelType)
+                                       ActivateModelWindow(topModel)
+                                   Catch ex As Exception
+                                       ' Values are set; regeneration is best-effort.
+                                       LogApplicationError("Push inheritance regenerate", ex)
+                                   End Try
+                               End If
+
+                               Dim summary = "Pushed " & setCount.ToString(CultureInfo.InvariantCulture) & " parameter value(s); " &
+                                             missingCount.ToString(CultureInfo.InvariantCulture) & " missing, " &
+                                             drivenCount.ToString(CultureInfo.InvariantCulture) & " relation-driven, " &
+                                             failedCount.ToString(CultureInfo.InvariantCulture) & " failed."
+                               If problems.Count = 0 Then
+                                   Return OperationResult.Ok(summary)
+                               End If
+
+                               Dim listed = problems.GetRange(0, Math.Min(problems.Count, MaxListedProblems))
+                               If problems.Count > MaxListedProblems Then
+                                   listed.Add("..." & (problems.Count - MaxListedProblems).ToString(CultureInfo.InvariantCulture) & " more")
+                               End If
+
+                               Return OperationResult.Fail(summary & " Issues: " & String.Join(" | ", listed.ToArray()))
                            End Function)
         End Function
 
@@ -720,11 +864,13 @@ Namespace CreoRegenAppVB
                                Next
 
                                ' Unhide everything the app hid previously, then re-apply the current rules.
+                               Dim layersReset As Integer = 0
                                For Each owner In ownersByKey
                                    Try
-                                       Dim layer = GetExcludedLayer(owner.Value, layerItemType, False)
+                                       Dim layer = FindExcludedLayer(owner.Value, layerItemType)
                                        If layer IsNot Nothing Then
-                                           shownCount += ClearLayer(layer)
+                                           shownCount += ResetExcludedLayer(layer)
+                                           layersReset += 1
                                        End If
                                    Catch ex As Exception
                                        LogApplicationError("Unhide components in " & owner.Key, ex)
@@ -734,7 +880,10 @@ Namespace CreoRegenAppVB
 
                                For Each entry In toHide
                                    Try
-                                       Dim layer = GetExcludedLayer(entry.Item2, layerItemType, True)
+                                       Dim layer = FindExcludedLayer(entry.Item2, layerItemType)
+                                       If layer Is Nothing Then
+                                           layer = InvokeMethod(entry.Item2, "CreateLayer", ExcludedLayerName)
+                                       End If
                                        InvokeMethod(layer, "AddItem", entry.Item3)
                                        SetProperty(layer, "Status", blankStatus)
                                        hiddenCount += 1
@@ -744,7 +893,7 @@ Namespace CreoRegenAppVB
                                    End Try
                                Next
 
-                               If hiddenCount + shownCount > 0 Then
+                               If hiddenCount + shownCount + layersReset > 0 Then
                                    Try
                                        ActivateModelWindow(model)
                                    Catch
@@ -752,7 +901,8 @@ Namespace CreoRegenAppVB
                                    End Try
                                End If
 
-                               Dim summary = "Creo: unhid " & shownCount.ToString(CultureInfo.InvariantCulture) & " component(s), then hid " &
+                               Dim summary = "Creo: reset " & layersReset.ToString(CultureInfo.InvariantCulture) & " layer(s), unhid " &
+                                             shownCount.ToString(CultureInfo.InvariantCulture) & " component(s), then hid " &
                                              hiddenCount.ToString(CultureInfo.InvariantCulture) & " (layer " & ExcludedLayerName & ")."
                                If failures.Count > 0 Then
                                    Return OperationResult.Fail(summary & " Failed: " & String.Join(" | ", failures.ToArray()))
@@ -762,13 +912,50 @@ Namespace CreoRegenAppVB
                            End Function)
         End Function
 
-        Private Function GetExcludedLayer(ownerModel As Object, layerItemType As Integer, createIfMissing As Boolean) As Object
+        Private Function FindExcludedLayer(ownerModel As Object, layerItemType As Integer) As Object
             Dim layer = InvokeMethodSafe(ownerModel, "GetItemByName", layerItemType, ExcludedLayerName)
-            If layer IsNot Nothing OrElse Not createIfMissing Then
+            If layer IsNot Nothing Then
                 Return layer
             End If
 
-            Return InvokeMethod(ownerModel, "CreateLayer", ExcludedLayerName)
+            Dim layersObj = InvokeMethodSafe(ownerModel, "ListItems", layerItemType)
+            If layersObj Is Nothing Then
+                Return Nothing
+            End If
+
+            Dim countMsg As String = ""
+            Dim count = GetCollectionCount(layersObj, countMsg)
+            For i As Integer = 0 To count - 1
+                Dim candidate = GetCollectionItem(layersObj, i)
+                If candidate IsNot Nothing AndAlso
+                   String.Equals(TryGetString(candidate, "Name", "GetName"), ExcludedLayerName, StringComparison.OrdinalIgnoreCase) Then
+                    Return candidate
+                End If
+            Next
+
+            Return Nothing
+        End Function
+
+        ' Shows, empties and deletes the layer so no component stays blanked by it.
+        Private Function ResetExcludedLayer(layer As Object) As Integer
+            Dim displayStatus As Integer
+            If ResolvePfcEnumValue("EpfcLAYER_DISPLAY", displayStatus) Then
+                Try
+                    SetProperty(layer, "Status", displayStatus)
+                Catch ex As Exception
+                    LogApplicationError("Set layer display status", ex)
+                End Try
+            End If
+
+            Dim removed As Integer = 0
+            Try
+                removed = ClearLayer(layer)
+            Catch ex As Exception
+                LogApplicationError("Clear excluded layer", ex)
+            End Try
+
+            InvokeMethod(layer, "Delete")
+            Return removed
         End Function
 
         Private Function ClearLayer(layer As Object) As Integer

@@ -35,6 +35,7 @@ Namespace CreoRegenAppVB
         Private ReadOnly _collapseAllBomButton As Button
         Private ReadOnly _applyConfigButton As Button
         Private ReadOnly _saveRulesButton As Button
+        Private ReadOnly _pushToModelsButton As Button
         Private ReadOnly _hideExcludedButton As Button
         Private ReadOnly _showItemParametersButton As Button
         Private ReadOnly _setParameterButton As Button
@@ -65,6 +66,7 @@ Namespace CreoRegenAppVB
         Private _paramsModelInput As String
         Private _bomModelInput As String
         Private _bomTopFileName As String
+        Private _bomRulesDirty As Boolean
 
         Friend Sub New(status As LicenseStatus)
             _licenseStatus = status
@@ -146,6 +148,7 @@ Namespace CreoRegenAppVB
             _applyConfigButton = CreateToolbarButton("Apply Config", AddressOf ApplyConfigClicked)
             _applyConfigButton.Margin = New Padding(ToolbarGroupGap, 3, 3, 3)
             _saveRulesButton = CreateToolbarButton("Save Rules", AddressOf SaveRulesClickedAsync)
+            _pushToModelsButton = CreateToolbarButton("Push to Models", AddressOf PushToModelsClickedAsync)
 
             _exportBomButton = CreateToolbarButton("Export CSV", AddressOf ExportBomClicked)
             _exportBomButton.Margin = New Padding(ToolbarGroupGap, 3, 3, 3)
@@ -426,7 +429,7 @@ Namespace CreoRegenAppVB
             Dim paramsTab = CreateToolbarTabPage("Parameters", _paramsGrid, _loadParametersButton, _setParameterButton)
             Dim bomTab = CreateToolbarTabPage("BOM", _bomGrid,
                 _buildBomButton, _expandAllBomButton, _collapseAllBomButton, _hideExcludedButton,
-                _applyConfigButton, _saveRulesButton,
+                _applyConfigButton, _saveRulesButton, _pushToModelsButton,
                 _exportBomButton, _showItemParametersButton)
 
             _tabs.TabPages.Add(logTab)
@@ -850,6 +853,7 @@ Namespace CreoRegenAppVB
 
             Try
                 Dim summary = BomConfigEvaluator.Evaluate(_bomRowsAll, selectedParams)
+                _bomRulesDirty = False
                 RenderBomGrid()
 
                 Const MaxLoggedErrors As Integer = 20
@@ -934,6 +938,100 @@ Namespace CreoRegenAppVB
             End Try
         End Sub
 
+        Private Async Sub PushToModelsClickedAsync(sender As Object, e As EventArgs)
+            _bomGrid.EndEdit()
+            If _bomRowsAll.Count = 0 Then
+                AddLog("ERROR: Build the BOM before pushing values to models.")
+                Return
+            End If
+
+            If _bomRulesDirty Then
+                AddLog("ERROR: Rules changed since the last Apply Config. Click Apply Config first.")
+                Return
+            End If
+
+            ' One entry per file: identical values are pushed once, conflicting values are skipped.
+            Dim firstPathByFile As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+            Dim valuesByFile As New Dictionary(Of String, Dictionary(Of String, String))(StringComparer.OrdinalIgnoreCase)
+            Dim conflictsByFile As New Dictionary(Of String, HashSet(Of String))(StringComparer.OrdinalIgnoreCase)
+            Dim fileOrder As New List(Of String)()
+
+            For Each row In _bomRowsAll
+                If row.ParentNodeId = 0 OrElse row.IsExcluded OrElse row.InheritanceError IsNot Nothing OrElse
+                   row.ResolvedAssignments Is Nothing OrElse row.ResolvedAssignments.Count = 0 OrElse
+                   String.IsNullOrEmpty(row.FeaturePath) OrElse String.IsNullOrEmpty(row.FileName) Then
+                    Continue For
+                End If
+
+                Dim fileValues As Dictionary(Of String, String) = Nothing
+                If Not valuesByFile.TryGetValue(row.FileName, fileValues) Then
+                    fileValues = New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+                    valuesByFile(row.FileName) = fileValues
+                    conflictsByFile(row.FileName) = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+                    firstPathByFile(row.FileName) = row.FeaturePath
+                    fileOrder.Add(row.FileName)
+                End If
+
+                For Each assignment In row.ResolvedAssignments
+                    Dim existing As String = Nothing
+                    If Not fileValues.TryGetValue(assignment.Key, existing) Then
+                        fileValues(assignment.Key) = assignment.Value
+                    ElseIf Not String.Equals(existing, assignment.Value, StringComparison.Ordinal) Then
+                        conflictsByFile(row.FileName).Add(assignment.Key)
+                    End If
+                Next
+            Next
+
+            Dim items As New List(Of InheritedParameterItem)()
+            Dim parameterCount = 0
+            For Each fileName In fileOrder
+                Dim conflicts = conflictsByFile(fileName)
+                For Each conflictName In conflicts
+                    AddLog("WARN: " & fileName & ": instances resolve different values for " & conflictName & "; skipped.")
+                Next
+
+                Dim assignments As New List(Of KeyValuePair(Of String, String))()
+                For Each pair In valuesByFile(fileName)
+                    If Not conflicts.Contains(pair.Key) Then
+                        assignments.Add(pair)
+                    End If
+                Next
+
+                If assignments.Count = 0 Then
+                    Continue For
+                End If
+
+                parameterCount += assignments.Count
+                items.Add(New InheritedParameterItem With {
+                    .FeaturePath = firstPathByFile(fileName),
+                    .Label = fileName,
+                    .Assignments = assignments
+                })
+            Next
+
+            If items.Count = 0 Then
+                AddLog("Nothing to push. Click Apply Config first.")
+                Return
+            End If
+
+            Dim prompt = "Push " & parameterCount.ToString() & " inherited parameter value(s) to " & items.Count.ToString() & " model(s)?" &
+                         Environment.NewLine & Environment.NewLine &
+                         "Changes stay in the Creo session until you save the models in Creo."
+            If MessageBox.Show(Me, prompt, "Push to Models", MessageBoxButtons.YesNo, MessageBoxIcon.Question) <> DialogResult.Yes Then
+                Return
+            End If
+
+            SetBusyState(True)
+            Try
+                Dim result = Await _service.PushInheritedParametersAsync(_bomModelInput, items)
+                AddLog(If(result.Success, "OK: ", "WARN: ") & result.Message)
+            Catch ex As Exception
+                HandleUnexpectedError("Push to Models", ex)
+            Finally
+                SetBusyState(False)
+            End Try
+        End Sub
+
         Private Sub HideExcludedClicked(sender As Object, e As EventArgs)
             _bomGrid.EndEdit()
             _hideExcluded = Not _hideExcluded
@@ -960,8 +1058,10 @@ Namespace CreoRegenAppVB
             Dim ruleText = Convert.ToString(_bomGrid.Rows(e.RowIndex).Cells(e.ColumnIndex).Value)
             ruleText = If(ruleText, String.Empty).Replace(vbCr, " ").Replace(vbLf, " ").Replace(vbTab, " ").Trim()
             If columnName = "Conditions" Then
+                If Not String.Equals(If(row.Conditions, String.Empty), ruleText, StringComparison.Ordinal) Then _bomRulesDirty = True
                 row.Conditions = ruleText
             Else
+                If Not String.Equals(If(row.Inheritance, String.Empty), ruleText, StringComparison.Ordinal) Then _bomRulesDirty = True
                 row.Inheritance = ruleText
             End If
         End Sub
@@ -1401,6 +1501,7 @@ Namespace CreoRegenAppVB
             _collapseAllBomButton.Enabled = Not isBusy
             _applyConfigButton.Enabled = Not isBusy
             _saveRulesButton.Enabled = Not isBusy
+            _pushToModelsButton.Enabled = Not isBusy
             _hideExcludedButton.Enabled = Not isBusy
             _showItemParametersButton.Enabled = Not isBusy AndAlso _tabs.SelectedIndex = BomTabIndex AndAlso _bomGrid.SelectedRows.Count > 0
             _setParameterButton.Enabled = Not isBusy
